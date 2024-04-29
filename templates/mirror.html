@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>设置</title>
+    <style>
+        body {
+            background-color:#faebd7;
+        }
+    </style>
+</head>
+<body>
+    <h1>选择镜像翻转方向:</h1>
+    {% if filename %}
+    <img src="{{ url_for('uploaded_file', filename=filename) }}?{{ random }}">
+    {% endif %}
+
+    <form method="POST" action="/mirror">
+        <input type="hidden" name="filename" value="{{ filename }}">
+        <input type="radio" name="l2r" value="l2r" checked> 左到右
+        <input type="radio" name="l2r" value="r2l"> 右到左
+        <br><br>
+        <input type="submit" value="开始翻转">
+    </form>
+
+    {% if result_filename %}
+    <h2>处理后的结果:</h2>
+    <img src="{{ url_for('generated_file', filename=result_filename) }}?{{ random }}" alt="Processed Image">
+    {% endif %}
+
+    <br>
+    <a href="/upload">重新选择图像</a>
+</body>
+</html>
