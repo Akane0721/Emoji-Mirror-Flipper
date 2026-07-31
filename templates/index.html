@@ -1,53 +1,282 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>镜像</title>
-    <style>
-        body {
-            font-family: Arial, sans-serif;
-            background-color: #faebd7;
-           /* background-image: url('/static/bg.png'); 
-            background-size: cover; 
-            /*background-position: center;  
-            background-repeat: no-repeat;*/
-            margin: 0;
-            padding: 20px;
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>对称表情包生成器</title>
+<style>
+    :root {
+        --bg: #faebd7;
+        --card: #fffdf9;
+        --line: #e6d8c3;
+        --text: #3a332b;
+        --muted: #8a7f70;
+        --accent: #d2691e;
+        --accent-hi: #b8551a;
+        --danger: #c0392b;
+        --shadow: 0 2px 12px rgba(120, 90, 50, .12);
+    }
+    @media (prefers-color-scheme: dark) {
+        :root {
+            --bg: #211d18;
+            --card: #2c2721;
+            --line: #423a31;
+            --text: #ede5d9;
+            --muted: #9d9284;
+            --accent: #e08a4a;
+            --accent-hi: #f0a066;
+            --danger: #e57368;
+            --shadow: 0 2px 12px rgba(0, 0, 0, .35);
         }
-        h1 {
-            text-align: center;
-            color: #333;
-        }
-        form {
-            background-color: #fff;
-            padding: 20px;
-            border-radius: 8px;
-            box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
-            margin: 20px auto;
-            max-width: 400px;
-        }
-        input[type="file"] {
-            margin-bottom: 10px;
-        }
-        input[type="submit"] {
-            background-color: #007bff;
-            color: #fff;
-            border: none;
-            padding: 10px 20px;
-            border-radius: 5px;
-            cursor: pointer;
-        }
-        input[type="submit"]:hover {
-            background-color: #0056b3;
-        }
-    </style>
+    }
+    * { box-sizing: border-box; }
+    body {
+        margin: 0;
+        padding: 28px 20px 48px;
+        font-family: system-ui, "Segoe UI", "Microsoft YaHei", sans-serif;
+        background: var(--bg);
+        color: var(--text);
+        line-height: 1.6;
+    }
+    .wrap { max-width: 880px; margin: 0 auto; }
+    h1 { margin: 0 0 24px; font-size: 1.6rem; text-align: center; }
+
+    /* Drop zone */
+    #drop {
+        background: var(--card);
+        border: 2px dashed var(--line);
+        border-radius: 14px;
+        padding: 36px 20px;
+        text-align: center;
+        cursor: pointer;
+        transition: border-color .15s, background .15s;
+        box-shadow: var(--shadow);
+    }
+    #drop:hover, #drop.hot { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 7%, var(--card)); }
+    #drop.hot { border-style: solid; }
+    #drop .big { font-size: 2.2rem; line-height: 1; }
+    #drop .hint { color: var(--muted); font-size: .85rem; margin-top: 6px; }
+    #file { display: none; }
+
+    /* Work area */
+    #work { display: none; margin-top: 24px; }
+    .bar {
+        display: flex; flex-wrap: wrap; gap: 8px;
+        align-items: center; justify-content: center;
+        margin-bottom: 18px;
+    }
+    button {
+        font: inherit;
+        padding: 8px 16px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        background: var(--card);
+        color: var(--text);
+        cursor: pointer;
+        transition: background .15s, border-color .15s, color .15s;
+    }
+    button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+    button.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+    button:disabled { opacity: .5; cursor: default; }
+    button.ghost { border-style: dashed; }
+
+    .panes { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    @media (max-width: 620px) { .panes { grid-template-columns: 1fr; } }
+    .pane {
+        background: var(--card);
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        padding: 14px;
+        box-shadow: var(--shadow);
+        min-width: 0;
+    }
+    .pane h2 {
+        margin: 0 0 10px; font-size: .8rem; font-weight: 600;
+        text-transform: uppercase; letter-spacing: .06em; color: var(--muted);
+    }
+    .frame {
+        display: flex; align-items: center; justify-content: center;
+        min-height: 220px;
+        /* Checkerboard backing so transparent areas are visible */
+        background-image:
+            linear-gradient(45deg, var(--line) 25%, transparent 25%, transparent 75%, var(--line) 75%),
+            linear-gradient(45deg, var(--line) 25%, transparent 25%, transparent 75%, var(--line) 75%);
+        background-size: 16px 16px;
+        background-position: 0 0, 8px 8px;
+        border-radius: 8px;
+        overflow: hidden;
+    }
+    .frame img { max-width: 100%; max-height: 340px; display: block; }
+    .meta { margin-top: 10px; font-size: .78rem; color: var(--muted); text-align: center; word-break: break-all; }
+
+    #spin { display: none; font-size: .85rem; color: var(--muted); }
+    #spin.show { display: inline; }
+    #err {
+        display: none; margin-top: 16px; padding: 10px 14px;
+        border-left: 3px solid var(--danger);
+        background: color-mix(in srgb, var(--danger) 10%, var(--card));
+        color: var(--danger); border-radius: 6px; font-size: .88rem;
+    }
+    #err.show { display: block; }
+    .actions { display: flex; gap: 8px; justify-content: center; margin-top: 18px; }
+    a.dl {
+        font: inherit; text-decoration: none;
+        padding: 9px 20px; border-radius: 999px;
+        background: var(--accent); color: #fff;
+        transition: background .15s;
+    }
+    a.dl:hover { background: var(--accent-hi); }
+    a.dl.off { pointer-events: none; opacity: .4; }
+</style>
 </head>
 <body>
-    <h1>上传图片 (jpg, png) 或gif文件</h1>
-    <form action="/upload" method="post" enctype="multipart/form-data">
-        <input type="file" name="file">
-        <input type="submit" value="Upload">
-    </form>
+<div class="wrap">
+    <h1>对称表情包生成器</h1>
+
+    <div id="drop">
+        <div class="big">🫠</div>
+        <div><strong>拖拽图片</strong>，或点击选择</div>
+        <div class="hint">也可以直接 Ctrl+V 粘贴 · 支持 jpg / png / gif / webp · 最大 {{ max_mb }}MB</div>
+        <input type="file" id="file" accept="image/jpeg,image/png,image/gif,image/webp">
+    </div>
+
+    <div id="err"></div>
+
+    <div id="work">
+        <div class="bar">
+            {% for key, label in directions %}
+            <button class="dir" data-dir="{{ key }}">{{ label }}</button>
+            {% endfor %}
+            <span id="spin">处理中…</span>
+        </div>
+
+        <div class="panes">
+            <div class="pane">
+                <h2>原图</h2>
+                <div class="frame"><img id="src" alt="原图"></div>
+                <div class="meta" id="srcMeta"></div>
+            </div>
+            <div class="pane">
+                <h2>结果</h2>
+                <div class="frame"><img id="out" alt="结果" style="display:none"></div>
+                <div class="meta" id="outMeta">选一个方向</div>
+            </div>
+        </div>
+
+        <div class="actions">
+            <a class="dl off" id="dl" download>下载</a>
+            <button class="ghost" id="reset">重新选择</button>
+        </div>
+    </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const drop = $('drop'), fileInput = $('file'), work = $('work'), err = $('err');
+const srcImg = $('src'), outImg = $('out'), srcMeta = $('srcMeta'), outMeta = $('outMeta');
+const dlLink = $('dl'), spin = $('spin');
+const dirButtons = [...document.querySelectorAll('.dir')];
+
+let current = null;   // the current upload: {id, animated, ...}
+let busy = false;
+
+function showError(msg) {
+    err.textContent = msg;
+    err.classList.add('show');
+}
+function clearError() {
+    err.classList.remove('show');
+}
+function setBusy(state) {
+    busy = state;
+    spin.classList.toggle('show', state);
+    dirButtons.forEach(b => b.disabled = state);
+}
+
+async function upload(file) {
+    if (!file) return;
+    clearError();
+    setBusy(true);
+    const body = new FormData();
+    body.append('file', file);
+
+    try {
+        const res = await fetch('/api/upload', { method: 'POST', body });
+        // Flask may just drop the connection when the size limit is hit, so catch that here too
+        const data = await res.json().catch(() => ({ ok: false, error: `上传失败（HTTP ${res.status}）` }));
+        if (!data.ok) { showError(data.error); return; }
+
+        current = data;
+        srcImg.src = data.src_url;
+        srcMeta.textContent = `${data.name} · ${data.width}×${data.height}`
+            + (data.animated ? ` · ${data.frames} 帧` : '');
+        outImg.style.display = 'none';
+        outMeta.textContent = '选一个方向';
+        dlLink.classList.add('off');
+        dirButtons.forEach(b => b.classList.remove('on'));
+        work.style.display = 'block';
+    } catch (e) {
+        showError('上传失败：' + e.message);
+    } finally {
+        setBusy(false);
+    }
+}
+
+async function doFlip(direction, button) {
+    if (!current || busy) return;
+    clearError();
+    setBusy(true);
+    dirButtons.forEach(b => b.classList.toggle('on', b === button));
+
+    try {
+        const res = await fetch('/api/flip', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ id: current.id, direction })
+        });
+        const data = await res.json().catch(() => ({ ok: false, error: `处理失败（HTTP ${res.status}）` }));
+        if (!data.ok) { showError(data.error); return; }
+
+        outImg.src = data.url;
+        outImg.style.display = 'block';
+        outMeta.textContent = button.textContent;
+        dlLink.href = data.download_url;
+        dlLink.classList.remove('off');
+    } catch (e) {
+        showError('处理失败：' + e.message);
+    } finally {
+        setBusy(false);
+    }
+}
+
+// Click to pick a file
+drop.addEventListener('click', () => fileInput.click());
+fileInput.addEventListener('change', () => {
+    upload(fileInput.files[0]);
+    fileInput.value = '';   // reset so picking the same file twice still fires
+});
+
+// Drag and drop
+['dragenter', 'dragover'].forEach(ev =>
+    drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.add('hot'); }));
+['dragleave', 'drop'].forEach(ev =>
+    drop.addEventListener(ev, e => { e.preventDefault(); drop.classList.remove('hot'); }));
+drop.addEventListener('drop', e => upload(e.dataTransfer.files[0]));
+
+// Paste from clipboard
+document.addEventListener('paste', e => {
+    const item = [...(e.clipboardData?.items || [])].find(i => i.type.startsWith('image/'));
+    if (item) upload(item.getAsFile());
+});
+
+dirButtons.forEach(b => b.addEventListener('click', () => doFlip(b.dataset.dir, b)));
+
+$('reset').addEventListener('click', () => {
+    current = null;
+    work.style.display = 'none';
+    clearError();
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+});
+</script>
 </body>
 </html>

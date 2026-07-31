@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+
+.venv/
+venv/
+env/
+
+# Runtime temp images
+uploads/*
+output/*
+!uploads/.gitkeep
+!output/.gitkeep
+
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
