@@ -95,4 +95,3 @@ flip(src, Path("out.gif"), "l2r", info.animated)
 * 删除 `mirror.html`、`upload_failed.html`（三份重复 CSS，且存在 `/* /* */` 嵌套坏注释）
 * 移除 `mirror.py` 中残留的模块级无用变量和注释掉的调用
 * 取消跟踪误提交的 `__pycache__` 和 `uploads/` `output/` 下的示例文件
-* 代码注释统一为英文
