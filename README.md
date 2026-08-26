@@ -23,6 +23,7 @@ python app.py
 * 拖拽、点击选择、或者直接 `Ctrl+V` 粘贴图片
 * 支持 **jpg / png / gif / webp**，单文件上限 25MB
 * 四个方向：左→右、右→左、上→下、下→上
+* **万花筒**：4 / 6 / 8 / 12 / 16 瓣可选，切瓣数即时重渲染
 * 切方向即时预览，原图和结果并排对比，透明区域用棋盘格衬底显示
 * 一键下载
 * 动图保留原本的**帧间隔**和循环次数，透明通道不会变黑
@@ -55,14 +56,42 @@ uploads/ output/    运行时临时文件，自动清理
 
 ```python
 from pathlib import Path
-from mirror import flip, probe
+from mirror import KALEIDO, flip, probe
 
 src = Path("target.gif")
 info = probe(src)                                  # validates that it really is an image
-flip(src, Path("out.gif"), "l2r", info.animated)
+
+flip(src, Path("out.gif"), "l2r", info.animated)                 # mirror
+flip(src, Path("kal.gif"), KALEIDO, info.animated, segments=8)   # kaleidoscope
 ```
 
+## 万花筒是怎么做的
+
+不是简单的四向镜像叠加，而是标准的 **n 重二面体对称**：
+
+1. 以中心裁成正方形（所以输出尺寸会变成 `min(宽, 高)` 的正方形）
+2. 切出一个 `360/n` 度的扇形楔块
+3. 把楔块沿水平中轴镜像，得到一个跨度 `2×360/n` 的「单元」
+4. 把这个单元绕中心旋转 `n/2` 次，正好铺满一圈
+
+这样得到的图形有 **n 条过中心的镜像轴**，才是万花筒该有的样子 —— 只做旋转不做镜像的话看起来是「风车」而不是万花筒。瓣数必须是偶数，否则镜像单元没法整除一整圈。
+
+楔形遮罩在 4 倍尺寸下绘制再缩回，避免两条放射状边缘出现锯齿。
+
+注意：万花筒只采样源图中那一瓣扇形的内容，其余部分不会出现在结果里 —— 这是万花筒的固有特性，不是 bug。
+
 ## 更新记录
+
+### 2026-07-30
+
+新增**万花筒**高级对称选项。
+
+* `mirror.py` 新增 `KALEIDO` 模式与 `_kaleido_frame()`，实现 n 重二面体对称，瓣数支持 4 / 6 / 8 / 12 / 16
+* 静态图和动图都支持，动图逐帧处理并保留原帧间隔
+* 前端加「高级」一栏：万花筒按钮 + 瓣数下拉框，万花筒激活时改瓣数会即时重渲染；处于镜像模式时改瓣数不触发渲染
+* 结果区现在会显示输出尺寸，因为万花筒会把图裁成正方形
+* API 字段 `direction` 改名为 `mode`（万花筒不是一个「方向」），新增可选的 `segments`
+* 输出文件名与 URL 改用 variant 键（如 `kaleido12`），不同瓣数各自缓存、互不覆盖；`parse_variant()` 统一校验，非法 variant 一律 404
 
 ### 2026-07-29
 

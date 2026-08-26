@@ -12,8 +12,11 @@ from pathlib import Path
 from threading import Timer
 
 from flask import Flask, abort, jsonify, render_template, request, send_file
+from PIL import Image
 
-from mirror import DIRECTION_LABELS, DIRECTIONS, MirrorError, flip, probe
+from mirror import (DEFAULT_SEGMENTS, DIRECTION_LABELS, DIRECTIONS, KALEIDO,
+                    KALEIDO_LABEL, KALEIDO_SEGMENTS, MODES, MirrorError, flip,
+                    parse_variant, probe, variant_key)
 
 BASE_DIR = Path(__file__).resolve().parent
 UPLOAD_DIR = BASE_DIR / "uploads"
@@ -42,6 +45,10 @@ def _sweep_old_files() -> None:
         if not folder.is_dir():
             continue
         for item in folder.iterdir():
+            # Leave dotfiles alone: .gitkeep is what keeps these otherwise
+            # empty directories in the repo, and it is always "expired".
+            if item.name.startswith("."):
+                continue
             try:
                 if item.is_file() and item.stat().st_mtime < cutoff:
                     item.unlink()
@@ -74,13 +81,20 @@ def _source_path(file_id: str) -> Path:
 # Pages
 # --------------------------------------------------------------------------
 
+def _page_context() -> dict:
+    return {
+        "directions": [(key, DIRECTION_LABELS[key]) for key in DIRECTIONS],
+        "kaleido_mode": KALEIDO,
+        "kaleido_label": KALEIDO_LABEL,
+        "kaleido_segments": list(KALEIDO_SEGMENTS),
+        "default_segments": DEFAULT_SEGMENTS,
+        "max_mb": MAX_UPLOAD_BYTES // (1024 * 1024),
+    }
+
+
 @app.get("/")
 def index():
-    return render_template(
-        "index.html",
-        directions=[(key, DIRECTION_LABELS[key]) for key in DIRECTIONS],
-        max_mb=MAX_UPLOAD_BYTES // (1024 * 1024),
-    )
+    return render_template("index.html", **_page_context())
 
 
 # --------------------------------------------------------------------------
@@ -130,10 +144,23 @@ def api_upload():
 def api_flip():
     payload = request.get_json(silent=True) or {}
     file_id = str(payload.get("id", ""))
-    direction = str(payload.get("direction", ""))
+    mode = str(payload.get("mode", ""))
 
-    if direction not in DIRECTIONS:
-        return jsonify(ok=False, error="方向不对"), 400
+    if mode not in MODES:
+        return jsonify(ok=False, error="处理方式不对"), 400
+
+    segments = None
+    if mode == KALEIDO:
+        raw = payload.get("segments", DEFAULT_SEGMENTS)
+        try:
+            segments = int(raw)
+        except (TypeError, ValueError):
+            return jsonify(ok=False, error="瓣数得是个数字"), 400
+        if segments not in KALEIDO_SEGMENTS:
+            return jsonify(
+                ok=False,
+                error=f"万花筒瓣数只能是 {', '.join(map(str, KALEIDO_SEGMENTS))}",
+            ), 400
 
     src = _source_path(file_id)
     try:
@@ -141,21 +168,27 @@ def api_flip():
     except MirrorError as exc:
         return jsonify(ok=False, error=str(exc)), 400
 
+    variant = variant_key(mode, segments)
     OUTPUT_DIR.mkdir(exist_ok=True)
-    dst = OUTPUT_DIR / f"{file_id}_{direction}.{info.ext}"
+    dst = OUTPUT_DIR / f"{file_id}_{variant}.{info.ext}"
 
     if not dst.exists():
         try:
-            flip(src, dst, direction, info.animated)
+            flip(src, dst, mode, info.animated, segments=segments)
         except MirrorError as exc:
             return jsonify(ok=False, error=str(exc)), 400
+
+    with Image.open(dst) as rendered:
+        out_w, out_h = rendered.size
 
     # Cache-buster so the browser doesn't show a stale result
     stamp = int(dst.stat().st_mtime)
     return jsonify(
         ok=True,
-        url=f"/media/out/{file_id}/{direction}?v={stamp}",
-        download_url=f"/download/{file_id}/{direction}",
+        url=f"/media/out/{file_id}/{variant}?v={stamp}",
+        download_url=f"/download/{file_id}/{variant}",
+        width=out_w,
+        height=out_h,
     )
 
 
@@ -168,28 +201,32 @@ def media_src(file_id: str):
     return send_file(_source_path(file_id))
 
 
-@app.get("/media/out/<file_id>/<direction>")
-def media_out(file_id: str, direction: str):
-    if direction not in DIRECTIONS:
+def _output_path(file_id: str, variant: str) -> tuple[Path, str, int | None]:
+    """Resolve a rendered output, rejecting anything we didn't produce."""
+    try:
+        mode, segments = parse_variant(variant)
+    except MirrorError:
         abort(404)
-    path = _find(OUTPUT_DIR, f"{_check_id(file_id)}_{direction}")
+    path = _find(OUTPUT_DIR, f"{_check_id(file_id)}_{variant}")
     if path is None:
         abort(404)
+    return path, mode, segments
+
+
+@app.get("/media/out/<file_id>/<variant>")
+def media_out(file_id: str, variant: str):
+    path, _mode, _segments = _output_path(file_id, variant)
     return send_file(path)
 
 
-@app.get("/download/<file_id>/<direction>")
-def download(file_id: str, direction: str):
-    if direction not in DIRECTIONS:
-        abort(404)
-    path = _find(OUTPUT_DIR, f"{_check_id(file_id)}_{direction}")
-    if path is None:
-        abort(404)
-    return send_file(
-        path,
-        as_attachment=True,
-        download_name=f"对称_{DIRECTION_LABELS[direction]}{path.suffix}",
-    )
+@app.get("/download/<file_id>/<variant>")
+def download(file_id: str, variant: str):
+    path, mode, segments = _output_path(file_id, variant)
+    if mode == KALEIDO:
+        name = f"{KALEIDO_LABEL}{segments}瓣{path.suffix}"
+    else:
+        name = f"对称_{DIRECTION_LABELS[mode]}{path.suffix}"
+    return send_file(path, as_attachment=True, download_name=name)
 
 
 # --------------------------------------------------------------------------
@@ -205,9 +242,7 @@ def too_large(_exc):
 def not_found(_exc):
     if request.path.startswith(("/api/", "/media/", "/download/")):
         return jsonify(ok=False, error="找不到这个文件，可能已经过期了"), 404
-    return render_template("index.html",
-                           directions=[(k, DIRECTION_LABELS[k]) for k in DIRECTIONS],
-                           max_mb=MAX_UPLOAD_BYTES // (1024 * 1024)), 404
+    return render_template("index.html", **_page_context()), 404
 
 
 @app.errorhandler(500)

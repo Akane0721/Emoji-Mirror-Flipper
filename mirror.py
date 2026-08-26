@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from PIL import Image, ImageSequence, UnidentifiedImageError
+from PIL import Image, ImageDraw, ImageSequence, UnidentifiedImageError
 
 DIRECTIONS = ("l2r", "r2l", "t2b", "b2t")
 
@@ -17,10 +18,22 @@ DIRECTION_LABELS = {
     "b2t": "下→上",
 }
 
+# Kaleidoscope is a different kind of operation from the four mirror
+# directions: it takes a segment count instead of an axis.
+KALEIDO = "kaleido"
+KALEIDO_LABEL = "万花筒"
+# Must be even, otherwise the mirrored cell can't tile the circle exactly.
+KALEIDO_SEGMENTS = (4, 6, 8, 12, 16)
+DEFAULT_SEGMENTS = 8
+
+MODES = DIRECTIONS + (KALEIDO,)
+
 # Accepted input formats, mapping Pillow's detected format name to an extension
 FORMAT_EXT = {"JPEG": "jpg", "PNG": "png", "GIF": "gif", "WEBP": "webp"}
 
 MAX_PIXELS = 50_000_000  # decompression-bomb guard, roughly 7000x7000
+
+_VARIANT_RE = re.compile(r"\A(?:(l2r|r2l|t2b|b2t)|kaleido(\d{1,2}))\Z")
 
 
 class MirrorError(Exception):
@@ -35,6 +48,34 @@ class ImageInfo:
     height: int
     animated: bool
     n_frames: int
+
+
+# --------------------------------------------------------------------------
+# Variant keys
+#
+# A "variant" is the single token that names one rendered result, used both as
+# the output filename stem and as the URL path segment. Mirror modes are their
+# own name; kaleidoscope folds the segment count in, so 6 and 12 segments don't
+# collide in the output cache.
+# --------------------------------------------------------------------------
+
+def variant_key(mode: str, segments: int | None = None) -> str:
+    if mode == KALEIDO:
+        return f"{KALEIDO}{segments if segments is not None else DEFAULT_SEGMENTS}"
+    return mode
+
+
+def parse_variant(variant: str) -> tuple[str, int | None]:
+    """Turn a variant token back into (mode, segments), validating both."""
+    match = _VARIANT_RE.match(variant or "")
+    if match is None:
+        raise MirrorError("未知的处理方式")
+    if match.group(1):
+        return match.group(1), None
+    segments = int(match.group(2))
+    if segments not in KALEIDO_SEGMENTS:
+        raise MirrorError(f"万花筒瓣数只能是 {', '.join(map(str, KALEIDO_SEGMENTS))}")
+    return KALEIDO, segments
 
 
 def probe(path: Path) -> ImageInfo:
@@ -71,6 +112,10 @@ def probe(path: Path) -> ImageInfo:
         raise MirrorError(f"图片读取失败：{exc}") from None
 
 
+# --------------------------------------------------------------------------
+# Per-frame transforms
+# --------------------------------------------------------------------------
+
 def _mirror_frame(frame: Image.Image, direction: str) -> Image.Image:
     """Mirror a single frame. Takes and returns RGBA, preserving alpha."""
     if direction not in DIRECTIONS:
@@ -106,12 +151,82 @@ def _mirror_frame(frame: Image.Image, direction: str) -> Image.Image:
     return out
 
 
-def _flip_static(src: Path, dst: Path, direction: str) -> None:
+def _wedge_mask(size: int, wedge_deg: float) -> Image.Image:
+    """Build an antialiased mask covering one pie wedge starting at 3 o'clock.
+
+    The mask is drawn at 4x and shrunk back down, otherwise the two straight
+    radial edges come out visibly stair-stepped.
+    """
+    scale = 4
+    big = Image.new("L", (size * scale, size * scale), 0)
+    center = size * scale / 2
+    # Overshoot the radius so the wedge still covers the square's corners.
+    radius = size * scale
+    ImageDraw.Draw(big).pieslice(
+        [center - radius, center - radius, center + radius, center + radius],
+        0,
+        wedge_deg,
+        fill=255,
+    )
+    return big.resize((size, size), Image.LANCZOS)
+
+
+def _kaleido_frame(frame: Image.Image, segments: int) -> Image.Image:
+    """Build an n-fold kaleidoscope from a single frame.
+
+    Crops to a centred square, cuts one wedge of 360/n degrees, mirrors it into
+    a cell spanning twice that angle, then rotates the cell around the centre
+    n/2 times to close the circle. The result has n mirror lines through the
+    centre, which is what makes it read as a kaleidoscope rather than as a
+    plain rotation.
+    """
+    if segments not in KALEIDO_SEGMENTS:
+        raise MirrorError(f"万花筒瓣数只能是 {', '.join(map(str, KALEIDO_SEGMENTS))}")
+
+    size = min(frame.size)
+    left = (frame.width - size) // 2
+    top = (frame.height - size) // 2
+    base = frame.crop((left, top, left + size, top + size))
+
+    wedge_deg = 360 / segments
+    centre = size / 2
+
+    wedge = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    wedge.paste(base, (0, 0), _wedge_mask(size, wedge_deg))
+
+    # Flipping vertically reflects across the horizontal centre line, i.e.
+    # maps angle t to -t, so wedge + flipped wedge spans [-wedge, +wedge].
+    cell = Image.alpha_composite(
+        wedge.transpose(Image.Transpose.FLIP_TOP_BOTTOM), wedge
+    )
+
+    out = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+    for k in range(segments // 2):
+        rotated = cell.rotate(
+            -k * 2 * wedge_deg,
+            resample=Image.BICUBIC,
+            center=(centre, centre),
+        )
+        out = Image.alpha_composite(out, rotated)
+    return out
+
+
+def _transform(frame: Image.Image, mode: str, segments: int | None) -> Image.Image:
+    if mode == KALEIDO:
+        return _kaleido_frame(frame, segments or DEFAULT_SEGMENTS)
+    return _mirror_frame(frame, mode)
+
+
+# --------------------------------------------------------------------------
+# File-level entry points
+# --------------------------------------------------------------------------
+
+def _flip_static(src: Path, dst: Path, mode: str, segments: int | None) -> None:
     with Image.open(src) as im:
         im.load()
         frame = im.convert("RGBA")
 
-    out = _mirror_frame(frame, direction)
+    out = _transform(frame, mode, segments)
 
     if dst.suffix.lower() in (".jpg", ".jpeg"):
         # JPEG has no alpha channel, so composite onto white first
@@ -122,7 +237,7 @@ def _flip_static(src: Path, dst: Path, direction: str) -> None:
         out.save(dst)
 
 
-def _flip_animated(src: Path, dst: Path, direction: str) -> None:
+def _flip_animated(src: Path, dst: Path, mode: str, segments: int | None) -> None:
     frames: list[Image.Image] = []
     durations: list[int] = []
 
@@ -131,7 +246,7 @@ def _flip_animated(src: Path, dst: Path, direction: str) -> None:
         loop = im.info.get("loop", 0)
         for frame in ImageSequence.Iterator(im):
             # convert() composites the current frame per the GIF disposal rules
-            frames.append(_mirror_frame(frame.convert("RGBA"), direction))
+            frames.append(_transform(frame.convert("RGBA"), mode, segments))
             durations.append(frame.info.get("duration", default_duration))
 
     if not frames:
@@ -148,15 +263,28 @@ def _flip_animated(src: Path, dst: Path, direction: str) -> None:
     )
 
 
-def flip(src: Path, dst: Path, direction: str, animated: bool) -> None:
-    """Mirror src into dst. `animated` comes from probe()."""
+def flip(
+    src: Path,
+    dst: Path,
+    mode: str,
+    animated: bool,
+    segments: int | None = None,
+) -> None:
+    """Transform src into dst. `animated` comes from probe().
+
+    `mode` is one of DIRECTIONS or KALEIDO; `segments` only applies to the
+    latter and falls back to DEFAULT_SEGMENTS.
+    """
+    if mode not in MODES:
+        raise MirrorError(f"未知的处理方式：{mode}")
+
     src, dst = Path(src), Path(dst)
     dst.parent.mkdir(parents=True, exist_ok=True)
     try:
         if animated:
-            _flip_animated(src, dst, direction)
+            _flip_animated(src, dst, mode, segments)
         else:
-            _flip_static(src, dst, direction)
+            _flip_static(src, dst, mode, segments)
     except MirrorError:
         raise
     except OSError as exc:

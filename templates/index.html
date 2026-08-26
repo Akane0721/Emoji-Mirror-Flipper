@@ -80,6 +80,24 @@
     button:disabled { opacity: .5; cursor: default; }
     button.ghost { border-style: dashed; }
 
+    /* Advanced row */
+    .advanced { margin-top: -6px; }
+    .tag {
+        font-size: .72rem; letter-spacing: .08em; text-transform: uppercase;
+        color: var(--muted); padding-right: 2px;
+    }
+    .seg { display: inline-flex; align-items: center; gap: 6px; font-size: .85rem; color: var(--muted); }
+    .seg select {
+        font: inherit;
+        padding: 6px 10px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        background: var(--card);
+        color: var(--text);
+        cursor: pointer;
+    }
+    .seg select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
     .panes { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
     @media (max-width: 620px) { .panes { grid-template-columns: 1fr; } }
     .pane {
@@ -145,9 +163,22 @@
     <div id="work">
         <div class="bar">
             {% for key, label in directions %}
-            <button class="dir" data-dir="{{ key }}">{{ label }}</button>
+            <button class="mode" data-mode="{{ key }}">{{ label }}</button>
             {% endfor %}
             <span id="spin">处理中…</span>
+        </div>
+
+        <div class="bar advanced">
+            <span class="tag">高级</span>
+            <button class="mode" data-mode="{{ kaleido_mode }}">🔮 {{ kaleido_label }}</button>
+            <label class="seg">
+                瓣数
+                <select id="segments">
+                    {% for n in kaleido_segments %}
+                    <option value="{{ n }}"{% if n == default_segments %} selected{% endif %}>{{ n }}</option>
+                    {% endfor %}
+                </select>
+            </label>
         </div>
 
         <div class="panes">
@@ -171,13 +202,16 @@
 </div>
 
 <script>
+const KALEIDO = {{ kaleido_mode | tojson }};
+
 const $ = (id) => document.getElementById(id);
 const drop = $('drop'), fileInput = $('file'), work = $('work'), err = $('err');
 const srcImg = $('src'), outImg = $('out'), srcMeta = $('srcMeta'), outMeta = $('outMeta');
-const dlLink = $('dl'), spin = $('spin');
-const dirButtons = [...document.querySelectorAll('.dir')];
+const dlLink = $('dl'), spin = $('spin'), segSelect = $('segments');
+const modeButtons = [...document.querySelectorAll('.mode')];
 
-let current = null;   // the current upload: {id, animated, ...}
+let current = null;    // the current upload: {id, animated, ...}
+let activeMode = null; // so changing the segment count can re-render in place
 let busy = false;
 
 function showError(msg) {
@@ -190,7 +224,8 @@ function clearError() {
 function setBusy(state) {
     busy = state;
     spin.classList.toggle('show', state);
-    dirButtons.forEach(b => b.disabled = state);
+    modeButtons.forEach(b => b.disabled = state);
+    segSelect.disabled = state;
 }
 
 async function upload(file) {
@@ -211,9 +246,10 @@ async function upload(file) {
         srcMeta.textContent = `${data.name} · ${data.width}×${data.height}`
             + (data.animated ? ` · ${data.frames} 帧` : '');
         outImg.style.display = 'none';
-        outMeta.textContent = '选一个方向';
+        outMeta.textContent = '选一个效果';
         dlLink.classList.add('off');
-        dirButtons.forEach(b => b.classList.remove('on'));
+        activeMode = null;
+        modeButtons.forEach(b => b.classList.remove('on'));
         work.style.display = 'block';
     } catch (e) {
         showError('上传失败：' + e.message);
@@ -222,24 +258,31 @@ async function upload(file) {
     }
 }
 
-async function doFlip(direction, button) {
+async function doFlip(mode, button) {
     if (!current || busy) return;
     clearError();
     setBusy(true);
-    dirButtons.forEach(b => b.classList.toggle('on', b === button));
+    activeMode = mode;
+    modeButtons.forEach(b => b.classList.toggle('on', b === button));
+
+    const payload = { id: current.id, mode };
+    if (mode === KALEIDO) payload.segments = Number(segSelect.value);
 
     try {
         const res = await fetch('/api/flip', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ id: current.id, direction })
+            body: JSON.stringify(payload)
         });
         const data = await res.json().catch(() => ({ ok: false, error: `处理失败（HTTP ${res.status}）` }));
         if (!data.ok) { showError(data.error); return; }
 
         outImg.src = data.url;
         outImg.style.display = 'block';
-        outMeta.textContent = button.textContent;
+        // Kaleidoscope crops to a centred square, so the size can change
+        let label = button.textContent.trim();
+        if (data.width && data.height) label += ` · ${data.width}×${data.height}`;
+        outMeta.textContent = label;
         dlLink.href = data.download_url;
         dlLink.classList.remove('off');
     } catch (e) {
@@ -269,10 +312,19 @@ document.addEventListener('paste', e => {
     if (item) upload(item.getAsFile());
 });
 
-dirButtons.forEach(b => b.addEventListener('click', () => doFlip(b.dataset.dir, b)));
+modeButtons.forEach(b => b.addEventListener('click', () => doFlip(b.dataset.mode, b)));
+
+// Changing the segment count re-renders immediately, but only when the
+// kaleidoscope is what's currently on screen.
+segSelect.addEventListener('change', () => {
+    if (activeMode !== KALEIDO) return;
+    const button = modeButtons.find(b => b.dataset.mode === KALEIDO);
+    doFlip(KALEIDO, button);
+});
 
 $('reset').addEventListener('click', () => {
     current = null;
+    activeMode = null;
     work.style.display = 'none';
     clearError();
     window.scrollTo({ top: 0, behavior: 'smooth' });
