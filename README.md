@@ -1,6 +1,6 @@
 # Emoji-Mirror-Flipper
 
-方便快捷的对称表情包生成 web 应用，从此再也不用担心在群里找对称 bot 发图时被群友看见尴尬了。
+方便快捷的对称表情包生成 web 应用，再也不用在群里找对称 bot 了。
 
 ![](example.png)
 
