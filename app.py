@@ -14,11 +14,12 @@ from threading import Timer
 from flask import Flask, abort, jsonify, render_template, request, send_file
 from PIL import Image
 
-from mirror import (COUNT_LABELS, COUNT_MODES, COUNT_UNITS, COUNTS_BY_MODE,
-                    DEFAULT_OFFSET, MODE_FILENAMES, MODE_LABELS, MODES,
-                    OFFSET_STEP, PLAIN_MODES, RADIAL_MODES, MirrorError,
-                    check_count, check_offset, default_count, flip,
-                    parse_variant, probe, variant_key)
+from mirror import (AXIS_MODES, COUNT_LABELS, COUNT_MODES, COUNT_UNITS,
+                    COUNTS_BY_MODE, DEFAULT_OFFSET, FOLD_MODES, GRID_MODES,
+                    MODE_FILENAMES, MODE_LABELS, MODES, OFFSET_STEP,
+                    RADIAL_MODES, MirrorError, check_count, check_offset,
+                    default_count, describe_count, flip, parse_variant, probe,
+                    variant_key)
 
 BASE_DIR = Path(__file__).resolve().parent
 UPLOAD_DIR = BASE_DIR / "uploads"
@@ -85,10 +86,12 @@ def _source_path(file_id: str) -> Path:
 
 def _page_context() -> dict:
     return {
-        # First row: the modes with no parameters.
-        "plain_modes": [(key, MODE_LABELS[key]) for key in PLAIN_MODES],
-        # Second row: the modes that share the numeric selector.
+        # Row 1: single-axis folds. Row 2: folds across more than one axis.
+        "axis_modes": [(key, MODE_LABELS[key]) for key in AXIS_MODES],
+        "fold_modes": [(key, MODE_LABELS[key]) for key in FOLD_MODES],
+        # Row 3: the modes that share the numeric selector.
         "count_modes": [(key, MODE_LABELS[key]) for key in COUNT_MODES],
+        "grid_modes": list(GRID_MODES),
         "counts_by_mode": {m: list(v) for m, v in COUNTS_BY_MODE.items()},
         "default_count_by_mode": {m: default_count(m) for m in COUNT_MODES},
         "count_labels": COUNT_LABELS,
@@ -234,9 +237,9 @@ def download(file_id: str, variant: str):
     path, mode, count, offset = _output_path(file_id, variant)
     name = MODE_FILENAMES[mode]
     if mode in RADIAL_MODES:
-        name = f"{name}{count}{COUNT_UNITS[mode]}{offset}度"
+        name = f"{name}{describe_count(mode, count)}{offset}度"
     elif mode in COUNT_MODES:
-        name = f"{name}{count}{COUNT_UNITS[mode]}"
+        name = f"{name}{describe_count(mode, count)}"
     return send_file(path, as_attachment=True, download_name=f"{name}{path.suffix}")
 
 

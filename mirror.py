@@ -24,12 +24,18 @@ QUAD = "quad"
 KALEIDO = "kaleido"
 PINWHEEL = "pinwheel"
 TILE = "tile"
+WALLPAPER = "wallpaper"
 
 RADIAL_MODES = (KALEIDO, PINWHEEL)
+# Modes whose count means "cells per side" rather than "segments".
+GRID_MODES = (TILE, WALLPAPER)
 # Modes that take a numeric parameter from the same selector.
-COUNT_MODES = (KALEIDO, PINWHEEL, TILE)
-# Modes with no parameters at all; these share the first row of the UI.
-PLAIN_MODES = DIRECTIONS + DIAGONALS + (QUAD,)
+COUNT_MODES = RADIAL_MODES + GRID_MODES
+# The UI splits the parameterless modes into two rows: single-axis folds, then
+# the ones that fold more than one axis at once.
+AXIS_MODES = DIRECTIONS
+FOLD_MODES = DIAGONALS + (QUAD,)
+PLAIN_MODES = AXIS_MODES + FOLD_MODES
 
 MODES = PLAIN_MODES + COUNT_MODES
 
@@ -44,6 +50,7 @@ MODE_LABELS = {
     KALEIDO: "🔮 万华镜",
     PINWHEEL: "🌀 风车",
     TILE: "🧱 镜面平铺",
+    WALLPAPER: "🏵️ 镜像壁纸",
 }
 
 # Plain names for download filenames, without the emoji.
@@ -58,6 +65,7 @@ MODE_FILENAMES = {
     KALEIDO: "万华镜",
     PINWHEEL: "风车",
     TILE: "镜面平铺",
+    WALLPAPER: "镜像壁纸",
 }
 
 # The kaleidoscope mirrors each wedge, so two wedges make one cell and the
@@ -67,11 +75,25 @@ COUNTS_BY_MODE = {
     KALEIDO: (4, 6, 8, 12, 16),
     PINWHEEL: (3, 4, 5, 6, 8, 12, 16),
     TILE: (2, 3, 4, 6),
+    WALLPAPER: (2, 3, 4, 6),
 }
-DEFAULT_COUNT_BY_MODE = {KALEIDO: 8, PINWHEEL: 8, TILE: 3}
-COUNT_LABELS = {KALEIDO: "瓣数", PINWHEEL: "叶数", TILE: "重复"}
-# Shorter forms that read naturally inside a download filename.
-COUNT_UNITS = {KALEIDO: "瓣", PINWHEEL: "叶", TILE: "重"}
+DEFAULT_COUNT_BY_MODE = {KALEIDO: 8, PINWHEEL: 8, TILE: 3, WALLPAPER: 3}
+# The grid modes count cells per side rather than segments around a centre, so
+# their selector is labelled differently and their readouts spell out the whole
+# n x n grid instead of a bare number.
+COUNT_LABELS = {KALEIDO: "瓣数", PINWHEEL: "叶数", TILE: "格数", WALLPAPER: "格数"}
+COUNT_UNITS = {KALEIDO: "瓣", PINWHEEL: "叶", TILE: "格", WALLPAPER: "格"}
+
+
+def describe_count(mode: str, count: int) -> str:
+    """Render a count for labels and filenames.
+
+    Radial modes get a bare number plus their unit; grid modes get the full
+    "n x n" form, since there the count means cells per side.
+    """
+    if mode in GRID_MODES:
+        return f"{count}x{count}{COUNT_UNITS[mode]}"
+    return f"{count}{COUNT_UNITS[mode]}"
 
 # Which wedge of the source the radial modes sample. Everything outside it is
 # discarded, so this changes the result far more than it sounds like it would.
@@ -83,7 +105,7 @@ FORMAT_EXT = {"JPEG": "jpg", "PNG": "png", "GIF": "gif", "WEBP": "webp"}
 MAX_PIXELS = 50_000_000  # decompression-bomb guard, roughly 7000x7000
 
 _PLAIN_RE = re.compile(r"\A(l2r|r2l|t2b|b2t|d1|d2|quad)\Z")
-_COUNT_RE = re.compile(r"\A(kaleido|pinwheel|tile)_(\d{1,2})_(\d{1,3})\Z")
+_COUNT_RE = re.compile(r"\A(kaleido|pinwheel|tile|wallpaper)_(\d{1,2})_(\d{1,3})\Z")
 
 
 class MirrorError(Exception):
@@ -307,6 +329,49 @@ def _tile_frame(frame: Image.Image, repeat: int) -> Image.Image:
     return out
 
 
+def _d4_cell(square: Image.Image) -> Image.Image:
+    """Fold a square until it has all four mirror lines of a square (D4).
+
+    Folding the whole square across a diagonal would undo any left-right and
+    top-bottom symmetry already there, because it throws away one triangle
+    outright. The fundamental domain of D4 is an eighth of the square, so the
+    fold has to happen one level down: make a single quadrant symmetric about
+    its own diagonal, then mirror that quadrant out to the other three.
+    """
+    side = square.width
+    half = math.ceil(side / 2)
+    quadrant = _diagonal_frame(square.crop((0, 0, half, half)), "d1")
+
+    flip_h = quadrant.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
+    out = Image.new("RGBA", (side, side), (0, 0, 0, 0))
+    out.paste(quadrant, (0, 0))
+    out.paste(flip_h, (side - half, 0))
+    out.paste(quadrant.transpose(Image.Transpose.FLIP_TOP_BOTTOM), (0, side - half))
+    out.paste(flip_h.transpose(Image.Transpose.FLIP_TOP_BOTTOM), (side - half, side - half))
+    return out
+
+
+def _wallpaper_frame(frame: Image.Image, repeat: int) -> Image.Image:
+    """Tile a fully symmetric motif across the frame.
+
+    Each cell carries the full D4 symmetry of a square, so opposite edges are
+    identical and plain repetition already lines up -- no alternating flips
+    needed. Every cell reads as a self-contained rosette, unlike the plain
+    tiling where a motif only completes across a 2x2 group.
+    """
+    check_count(WALLPAPER, repeat)
+
+    width, height = frame.size
+    side = math.ceil(max(width, height) / repeat)
+    cell = _d4_cell(_centre_square(frame).resize((side, side), Image.LANCZOS))
+
+    out = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    for row in range(math.ceil(height / side)):
+        for col in range(math.ceil(width / side)):
+            out.paste(cell, (col * side, row * side))
+    return out
+
+
 def _wedge_mask(size: int, wedge_deg: float, start_deg: float) -> Image.Image:
     """Antialiased mask covering one pie wedge, measured clockwise from 3 o'clock.
 
@@ -406,6 +471,8 @@ def _transform(
         )
     if mode == TILE:
         return _tile_frame(frame, default_count(TILE) if count is None else count)
+    if mode == WALLPAPER:
+        return _wallpaper_frame(frame, default_count(WALLPAPER) if count is None else count)
     if mode == QUAD:
         return _quad_frame(frame)
     if mode in DIAGONALS:

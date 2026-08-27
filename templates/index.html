@@ -164,10 +164,16 @@
 
     <div id="work">
         <div class="bar">
-            {% for key, label in plain_modes %}
+            {% for key, label in axis_modes %}
             <button class="mode" data-mode="{{ key }}">{{ label }}</button>
             {% endfor %}
             <span id="spin">处理中…</span>
+        </div>
+
+        <div class="bar advanced">
+            {% for key, label in fold_modes %}
+            <button class="mode" data-mode="{{ key }}">{{ label }}</button>
+            {% endfor %}
         </div>
 
         <div class="bar advanced">
@@ -211,6 +217,7 @@ const COUNTS_BY_MODE = {{ counts_by_mode | tojson }};
 const DEFAULT_COUNT_BY_MODE = {{ default_count_by_mode | tojson }};
 const COUNT_LABELS = {{ count_labels | tojson }};
 const COUNT_UNITS = {{ count_units | tojson }};
+const GRID_MODES = {{ grid_modes | tojson }};
 const RADIAL_MODES = {{ radial_modes | tojson }};
 
 const $ = (id) => document.getElementById(id);
@@ -328,7 +335,13 @@ async function doFlip(mode, button) {
         outImg.style.display = 'block';
         // Radial and diagonal modes crop to a centred square, so the size can change
         let label = button.textContent.trim();
-        if (hasCount(mode)) label += ` ${payload.count} ${COUNT_UNITS[mode]}`;
+        // Grid modes count cells per side, so spell out the whole n x n grid
+        if (hasCount(mode)) {
+            const n = payload.count;
+            label += GRID_MODES.includes(mode)
+                ? ` ${n}×${n} ${COUNT_UNITS[mode]}`
+                : ` ${n} ${COUNT_UNITS[mode]}`;
+        }
         if (isRadial(mode)) label += ` · ${payload.offset}°`;
         if (data.width && data.height) label += ` · ${data.width}×${data.height}`;
         outMeta.textContent = label;
