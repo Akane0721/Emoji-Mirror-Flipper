@@ -24,11 +24,11 @@ QUAD = "quad"
 KALEIDO = "kaleido"
 PINWHEEL = "pinwheel"
 TILE = "tile"
-WALLPAPER = "wallpaper"
+PAPERCUT = "papercut"
 
 RADIAL_MODES = (KALEIDO, PINWHEEL)
 # Modes whose count means "cells per side" rather than "segments".
-GRID_MODES = (TILE, WALLPAPER)
+GRID_MODES = (TILE, PAPERCUT)
 # Modes that take a numeric parameter from the same selector.
 COUNT_MODES = RADIAL_MODES + GRID_MODES
 # The UI splits the parameterless modes into two rows: single-axis folds, then
@@ -50,7 +50,7 @@ MODE_LABELS = {
     KALEIDO: "🔮 万华镜",
     PINWHEEL: "🌀 风车",
     TILE: "🧱 镜面平铺",
-    WALLPAPER: "🏵️ 镜像壁纸",
+    PAPERCUT: "🪷 窗花",
 }
 
 # Plain names for download filenames, without the emoji.
@@ -65,7 +65,7 @@ MODE_FILENAMES = {
     KALEIDO: "万华镜",
     PINWHEEL: "风车",
     TILE: "镜面平铺",
-    WALLPAPER: "镜像壁纸",
+    PAPERCUT: "窗花",
 }
 
 # The kaleidoscope mirrors each wedge, so two wedges make one cell and the
@@ -75,14 +75,14 @@ COUNTS_BY_MODE = {
     KALEIDO: (4, 6, 8, 12, 16),
     PINWHEEL: (3, 4, 5, 6, 8, 12, 16),
     TILE: (2, 3, 4, 6),
-    WALLPAPER: (2, 3, 4, 6),
+    PAPERCUT: (2, 3, 4, 6),
 }
-DEFAULT_COUNT_BY_MODE = {KALEIDO: 8, PINWHEEL: 8, TILE: 3, WALLPAPER: 3}
+DEFAULT_COUNT_BY_MODE = {KALEIDO: 8, PINWHEEL: 8, TILE: 3, PAPERCUT: 3}
 # The grid modes count cells per side rather than segments around a centre, so
 # their selector is labelled differently and their readouts spell out the whole
 # n x n grid instead of a bare number.
-COUNT_LABELS = {KALEIDO: "瓣数", PINWHEEL: "叶数", TILE: "格数", WALLPAPER: "格数"}
-COUNT_UNITS = {KALEIDO: "瓣", PINWHEEL: "叶", TILE: "格", WALLPAPER: "格"}
+COUNT_LABELS = {KALEIDO: "瓣数", PINWHEEL: "叶数", TILE: "格数", PAPERCUT: "格数"}
+COUNT_UNITS = {KALEIDO: "瓣", PINWHEEL: "叶", TILE: "格", PAPERCUT: "格"}
 
 
 def describe_count(mode: str, count: int) -> str:
@@ -95,6 +95,7 @@ def describe_count(mode: str, count: int) -> str:
         return f"{count}x{count}{COUNT_UNITS[mode]}"
     return f"{count}{COUNT_UNITS[mode]}"
 
+
 # Which wedge of the source the radial modes sample. Everything outside it is
 # discarded, so this changes the result far more than it sounds like it would.
 OFFSET_STEP = 5
@@ -105,7 +106,7 @@ FORMAT_EXT = {"JPEG": "jpg", "PNG": "png", "GIF": "gif", "WEBP": "webp"}
 MAX_PIXELS = 50_000_000  # decompression-bomb guard, roughly 7000x7000
 
 _PLAIN_RE = re.compile(r"\A(l2r|r2l|t2b|b2t|d1|d2|quad)\Z")
-_COUNT_RE = re.compile(r"\A(kaleido|pinwheel|tile|wallpaper)_(\d{1,2})_(\d{1,3})\Z")
+_COUNT_RE = re.compile(r"\A(kaleido|pinwheel|tile|papercut)_(\d{1,2})_(\d{1,3})\Z")
 
 
 class MirrorError(Exception):
@@ -351,15 +352,19 @@ def _d4_cell(square: Image.Image) -> Image.Image:
     return out
 
 
-def _wallpaper_frame(frame: Image.Image, repeat: int) -> Image.Image:
-    """Tile a fully symmetric motif across the frame.
+def _papercut_frame(frame: Image.Image, repeat: int) -> Image.Image:
+    """Tile a folded, fully symmetric motif across the frame.
+
+    Named after cut-paper window flowers, which are made exactly this way:
+    fold down to an eighth, cut, unfold. Only that eighth of the centre square
+    survives -- unlike the plain tiling, which keeps the whole image.
 
     Each cell carries the full D4 symmetry of a square, so opposite edges are
-    identical and plain repetition already lines up -- no alternating flips
-    needed. Every cell reads as a self-contained rosette, unlike the plain
-    tiling where a motif only completes across a 2x2 group.
+    identical and plain repetition already lines up; no alternating flips
+    needed. Every cell reads as a self-contained motif, unlike the plain tiling
+    where a motif only completes across a 2x2 group.
     """
-    check_count(WALLPAPER, repeat)
+    check_count(PAPERCUT, repeat)
 
     width, height = frame.size
     side = math.ceil(max(width, height) / repeat)
@@ -471,8 +476,8 @@ def _transform(
         )
     if mode == TILE:
         return _tile_frame(frame, default_count(TILE) if count is None else count)
-    if mode == WALLPAPER:
-        return _wallpaper_frame(frame, default_count(WALLPAPER) if count is None else count)
+    if mode == PAPERCUT:
+        return _papercut_frame(frame, default_count(PAPERCUT) if count is None else count)
     if mode == QUAD:
         return _quad_frame(frame)
     if mode in DIAGONALS:
