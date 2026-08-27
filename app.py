@@ -15,12 +15,12 @@ from flask import Flask, abort, jsonify, render_template, request, send_file
 from PIL import Image
 
 from mirror import (COUNT_LABELS, COUNT_MODES, COUNT_UNITS, COUNTS_BY_MODE,
-                    DEFAULT_COUNT_BY_MODE, DEFAULT_OFFSET,
-                    DEFAULT_TWIST, GRID_MODES, MAX_TWIST, MODE_FILENAMES,
+                    DEFAULT_COUNT_BY_MODE, DEFAULT_OFFSET, DEFAULT_TWIST,
+                    GRID_MODES, MAX_STEPS, MAX_TWIST, MODE_FILENAMES,
                     MODE_GROUPS, MODE_LABELS, MODES, OFFSET_STEP, RADIAL_MODES,
-                    TWIST_MODES, TWIST_STEP, MirrorError, check_count,
-                    check_offset, check_twist, default_count, describe_count,
-                    flip, parse_variant, probe, variant_key)
+                    TWIST_MODES, TWIST_STEP, MirrorError, Step, chain_key,
+                    check_count, check_offset, check_twist, default_count,
+                    describe_count, flip_chain, parse_chain, probe)
 
 BASE_DIR = Path(__file__).resolve().parent
 UPLOAD_DIR = BASE_DIR / "uploads"
@@ -96,10 +96,12 @@ def _page_context() -> dict:
         "twist_step": TWIST_STEP,
         "default_twist": DEFAULT_TWIST,
         "max_twist": MAX_TWIST,
+        "max_steps": MAX_STEPS,
         "counts_by_mode": {m: list(v) for m, v in COUNTS_BY_MODE.items()},
         "default_count_by_mode": {m: default_count(m) for m in COUNT_MODES},
         "count_labels": COUNT_LABELS,
         "count_units": COUNT_UNITS,
+        "mode_labels": MODE_LABELS,
         "radial_modes": list(RADIAL_MODES),
         "offset_step": OFFSET_STEP,
         "default_offset": DEFAULT_OFFSET,
@@ -155,34 +157,54 @@ def api_upload():
     )
 
 
+def _build_step(raw: object) -> Step:
+    """Validate one step of a chain and normalise its parameters."""
+    if not isinstance(raw, dict):
+        raise MirrorError("效果格式不对")
+
+    mode = str(raw.get("mode", ""))
+    if mode not in MODES:
+        raise MirrorError("处理方式不对")
+    if mode not in COUNT_MODES:
+        return Step(mode)
+
+    try:
+        count = int(raw.get("count", default_count(mode)))
+        offset = int(raw.get("offset", DEFAULT_OFFSET))
+        twist = int(raw.get("twist", DEFAULT_TWIST))
+    except (TypeError, ValueError):
+        raise MirrorError("参数得是数字") from None
+
+    if mode not in RADIAL_MODES:
+        offset = 0  # only the radial modes have a start angle
+    twist = twist if mode in TWIST_MODES else None  # and only the spiral twists
+
+    check_count(mode, count)
+    check_offset(mode, offset)
+    if twist is not None:
+        check_twist(mode, twist)
+    return Step(mode, count, offset, twist)
+
+
 @app.post("/api/flip")
 def api_flip():
     payload = request.get_json(silent=True) or {}
     file_id = str(payload.get("id", ""))
-    mode = str(payload.get("mode", ""))
 
-    if mode not in MODES:
-        return jsonify(ok=False, error="处理方式不对"), 400
+    # Accept either a chain or the older single-effect shape.
+    raw_steps = payload.get("steps")
+    if raw_steps is None:
+        raw_steps = [payload]
+    if not isinstance(raw_steps, list) or not raw_steps:
+        return jsonify(ok=False, error="至少要选一个效果"), 400
+    if len(raw_steps) > MAX_STEPS:
+        return jsonify(ok=False, error=f"最多叠加 {MAX_STEPS} 个效果"), 400
 
-    count = offset = twist = None
-    if mode in COUNT_MODES:
-        try:
-            count = int(payload.get("count", default_count(mode)))
-            offset = int(payload.get("offset", DEFAULT_OFFSET))
-            twist = int(payload.get("twist", DEFAULT_TWIST))
-        except (TypeError, ValueError):
-            return jsonify(ok=False, error="参数得是数字"), 400
-        if mode not in RADIAL_MODES:
-            offset = 0  # only the radial modes have a start angle
-        if mode not in TWIST_MODES:
-            twist = None  # and only the spiral has a twist
-        try:
-            check_count(mode, count)
-            check_offset(mode, offset)
-            if twist is not None:
-                check_twist(mode, twist)
-        except MirrorError as exc:
-            return jsonify(ok=False, error=str(exc)), 400
+    try:
+        steps = [_build_step(raw) for raw in raw_steps]
+        variant = chain_key(steps)
+    except MirrorError as exc:
+        return jsonify(ok=False, error=str(exc)), 400
 
     src = _source_path(file_id)
     try:
@@ -190,14 +212,12 @@ def api_flip():
     except MirrorError as exc:
         return jsonify(ok=False, error=str(exc)), 400
 
-    variant = variant_key(mode, count, offset, twist)
     OUTPUT_DIR.mkdir(exist_ok=True)
     dst = OUTPUT_DIR / f"{file_id}_{variant}.{info.ext}"
 
     if not dst.exists():
         try:
-            flip(src, dst, mode, info.animated,
-                 count=count, offset=offset, twist=twist)
+            flip_chain(src, dst, steps, info.animated)
         except MirrorError as exc:
             return jsonify(ok=False, error=str(exc)), 400
 
@@ -208,6 +228,7 @@ def api_flip():
     stamp = int(dst.stat().st_mtime)
     return jsonify(
         ok=True,
+        variant=variant,
         url=f"/media/out/{file_id}/{variant}?v={stamp}",
         download_url=f"/download/{file_id}/{variant}",
         width=out_w,
@@ -227,13 +248,24 @@ def media_src(file_id: str):
 def _output_path(file_id: str, variant: str):
     """Resolve a rendered output, rejecting anything we didn't produce."""
     try:
-        mode, count, offset, twist = parse_variant(variant)
+        steps = parse_chain(variant)
     except MirrorError:
         abort(404)
     path = _find(OUTPUT_DIR, f"{_check_id(file_id)}_{variant}")
     if path is None:
         abort(404)
-    return path, mode, count, offset, twist
+    return path, steps
+
+
+def _step_filename(step: Step) -> str:
+    name = MODE_FILENAMES[step.mode]
+    if step.mode in RADIAL_MODES:
+        name = f"{name}{describe_count(step.mode, step.count)}{step.offset}度"
+        if step.mode in TWIST_MODES:
+            name = f"{name}扭{step.twist}"
+    elif step.mode in COUNT_MODES:
+        name = f"{name}{describe_count(step.mode, step.count)}"
+    return name
 
 
 @app.get("/media/out/<file_id>/<variant>")
@@ -243,14 +275,8 @@ def media_out(file_id: str, variant: str):
 
 @app.get("/download/<file_id>/<variant>")
 def download(file_id: str, variant: str):
-    path, mode, count, offset, twist = _output_path(file_id, variant)
-    name = MODE_FILENAMES[mode]
-    if mode in RADIAL_MODES:
-        name = f"{name}{describe_count(mode, count)}{offset}度"
-        if mode in TWIST_MODES:
-            name = f"{name}扭{twist}"
-    elif mode in COUNT_MODES:
-        name = f"{name}{describe_count(mode, count)}"
+    path, steps = _output_path(file_id, variant)
+    name = "_".join(_step_filename(s) for s in steps)
     return send_file(path, as_attachment=True, download_name=f"{name}{path.suffix}")
 
 

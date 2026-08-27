@@ -146,6 +146,23 @@ class ImageInfo:
     n_frames: int
 
 
+@dataclass(frozen=True)
+class Step:
+    """One effect in a chain, with whatever parameters that mode takes."""
+    mode: str
+    count: int | None = None
+    offset: int | None = None
+    twist: int | None = None
+
+
+# Effects can be stacked. Each extra step is another full pass over every
+# frame, so the chain is capped to keep animated GIFs from crawling.
+MAX_STEPS = 4
+# Safe because no mode name and no parameter ever contains a hyphen, so a
+# single-step key stays byte-identical to what it was before chaining existed.
+CHAIN_SEP = "-"
+
+
 # --------------------------------------------------------------------------
 # Variant keys
 #
@@ -202,6 +219,27 @@ def parse_variant(variant: str) -> tuple[str, int | None, int | None, int | None
     check_count(mode, count)
     check_offset(mode, offset)
     return mode, count, offset, None
+
+
+def step_key(step: Step) -> str:
+    return variant_key(step.mode, step.count, step.offset, step.twist)
+
+
+def chain_key(steps: list[Step]) -> str:
+    """The variant token for a whole chain, e.g. 'd1-kaleido_6_45'."""
+    if not steps:
+        raise MirrorError("至少要选一个效果")
+    if len(steps) > MAX_STEPS:
+        raise MirrorError(f"最多叠加 {MAX_STEPS} 个效果")
+    return CHAIN_SEP.join(step_key(s) for s in steps)
+
+
+def parse_chain(variant: str) -> list[Step]:
+    """Turn a variant token back into a list of Steps, validating every part."""
+    parts = (variant or "").split(CHAIN_SEP)
+    if not 1 <= len(parts) <= MAX_STEPS:
+        raise MirrorError("效果链长度不对")
+    return [Step(*parse_variant(part)) for part in parts]
 
 
 def check_count(mode: str, count: int) -> None:
@@ -620,15 +658,19 @@ def _transform(
 # File-level entry points
 # --------------------------------------------------------------------------
 
-def _flip_static(
-    src: Path, dst: Path, mode: str, count: int | None, offset: int | None,
-    twist: int | None,
-) -> None:
+def _apply_steps(frame: Image.Image, steps: list[Step]) -> Image.Image:
+    """Run a whole chain over one frame, in order."""
+    for step in steps:
+        frame = _transform(frame, step.mode, step.count, step.offset, step.twist)
+    return frame
+
+
+def _flip_static(src: Path, dst: Path, steps: list[Step]) -> None:
     with Image.open(src) as im:
         im.load()
         frame = im.convert("RGBA")
 
-    out = _transform(frame, mode, count, offset, twist)
+    out = _apply_steps(frame, steps)
 
     if dst.suffix.lower() in (".jpg", ".jpeg"):
         # JPEG has no alpha channel, so composite onto white first
@@ -639,10 +681,7 @@ def _flip_static(
         out.save(dst)
 
 
-def _flip_animated(
-    src: Path, dst: Path, mode: str, count: int | None, offset: int | None,
-    twist: int | None,
-) -> None:
+def _flip_animated(src: Path, dst: Path, steps: list[Step]) -> None:
     frames: list[Image.Image] = []
     durations: list[int] = []
 
@@ -651,7 +690,7 @@ def _flip_animated(
         loop = im.info.get("loop", 0)
         for frame in ImageSequence.Iterator(im):
             # convert() composites the current frame per the GIF disposal rules
-            frames.append(_transform(frame.convert("RGBA"), mode, count, offset, twist))
+            frames.append(_apply_steps(frame.convert("RGBA"), steps))
             durations.append(frame.info.get("duration", default_duration))
 
     if not frames:
@@ -668,6 +707,34 @@ def _flip_animated(
     )
 
 
+def flip_chain(src: Path, dst: Path, steps: list[Step], animated: bool) -> None:
+    """Apply a chain of effects to src and write the result to dst.
+
+    Steps run in the order given. Note that some of them change the frame's
+    dimensions -- the radial and diagonal modes crop to a centred square -- so
+    the order genuinely matters.
+    """
+    if not steps:
+        raise MirrorError("至少要选一个效果")
+    if len(steps) > MAX_STEPS:
+        raise MirrorError(f"最多叠加 {MAX_STEPS} 个效果")
+    for step in steps:
+        if step.mode not in MODES:
+            raise MirrorError(f"未知的处理方式：{step.mode}")
+
+    src, dst = Path(src), Path(dst)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        if animated:
+            _flip_animated(src, dst, steps)
+        else:
+            _flip_static(src, dst, steps)
+    except MirrorError:
+        raise
+    except OSError as exc:
+        raise MirrorError(f"处理失败：{exc}") from None
+
+
 def flip(
     src: Path,
     dst: Path,
@@ -677,22 +744,9 @@ def flip(
     offset: int | None = None,
     twist: int | None = None,
 ) -> None:
-    """Transform src into dst. `animated` comes from probe().
+    """Single-effect convenience wrapper around flip_chain().
 
     `count`, `offset` and `twist` only apply to the modes that take them and
     fall back to that mode's defaults.
     """
-    if mode not in MODES:
-        raise MirrorError(f"未知的处理方式：{mode}")
-
-    src, dst = Path(src), Path(dst)
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        if animated:
-            _flip_animated(src, dst, mode, count, offset, twist)
-        else:
-            _flip_static(src, dst, mode, count, offset, twist)
-    except MirrorError:
-        raise
-    except OSError as exc:
-        raise MirrorError(f"处理失败：{exc}") from None
+    flip_chain(src, dst, [Step(mode, count, offset, twist)], animated)

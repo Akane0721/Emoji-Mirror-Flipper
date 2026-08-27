@@ -109,6 +109,32 @@
     }
     button.mode.on { background: var(--accent); }
 
+    /* Effect chain */
+    .chain { display: inline-flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+    .chain:empty::after {
+        content: '点上面的效果开始';
+        color: var(--muted); font-size: .8rem;
+    }
+    .chip {
+        font: inherit; font-size: .8rem;
+        display: inline-flex; align-items: center; gap: 7px;
+        padding: 5px 10px;
+        border: 1px solid var(--line);
+        border-radius: 8px;
+        background: var(--card);
+        color: var(--text);
+        cursor: pointer;
+    }
+    .chip.sel { border-color: var(--accent); color: var(--accent); }
+    .chip .x { opacity: .45; font-size: .72rem; }
+    .chip .x:hover { opacity: 1; color: var(--danger); }
+    .arrow { color: var(--muted); opacity: .6; font-size: .8rem; }
+
+    button.toggle { padding: 5px 11px; font-size: .8rem; border-radius: 8px; }
+    button.toggle.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+    button.tiny { padding: 5px 11px; font-size: .8rem; border-radius: 8px; }
+    button.hide { display: none; }
+
     .ctl {
         display: inline-flex; align-items: center; gap: 7px;
         font-size: .82rem; color: var(--muted);
@@ -208,6 +234,16 @@
             </div>
             {% endfor %}
 
+            <div class="row" id="chainRow">
+                <span class="rlabel">流程</span>
+                <div class="chips">
+                    <div class="chain" id="chainBox"></div>
+                    <button class="toggle" id="stackBtn"
+                            title="打开后，点击效果会追加到流程末尾，而不是替换掉现有的">＋ 叠加</button>
+                    <button class="ghost tiny hide" id="clearBtn">清空</button>
+                </div>
+            </div>
+
             <div class="row hide" id="paramRow">
                 <span class="rlabel">参数</span>
                 <div class="chips">
@@ -259,6 +295,8 @@ const COUNT_UNITS = {{ count_units | tojson }};
 const GRID_MODES = {{ grid_modes | tojson }};
 const RADIAL_MODES = {{ radial_modes | tojson }};
 const TWIST_MODES = {{ twist_modes | tojson }};
+const MODE_LABELS = {{ mode_labels | tojson }};
+const MAX_STEPS = {{ max_steps | tojson }};
 
 const $ = (id) => document.getElementById(id);
 const drop = $('drop'), fileInput = $('file'), work = $('work'), err = $('err');
@@ -267,14 +305,17 @@ const dlLink = $('dl'), spin = $('spin'), paramRow = $('paramRow');
 const countSelect = $('count'), countLabel = $('countLabel'), countCtl = $('countCtl');
 const offsetInput = $('offset'), offsetOut = $('offsetOut'), offsetCtl = $('offsetCtl');
 const twistInput = $('twist'), twistOut = $('twistOut'), twistCtl = $('twistCtl');
+const chainBox = $('chainBox'), stackBtn = $('stackBtn'), clearBtn = $('clearBtn');
 const modeButtons = [...document.querySelectorAll('.mode')];
 
 const hasCount = (mode) => Object.prototype.hasOwnProperty.call(COUNTS_BY_MODE, mode);
 const isRadial = (mode) => RADIAL_MODES.includes(mode);
 const hasTwist = (mode) => TWIST_MODES.includes(mode);
 
-let current = null;    // the current upload: {id, animated, ...}
-let activeMode = null; // so changing a parameter can re-render in place
+let current = null;   // the current upload: {id, animated, ...}
+let chain = [];       // the effect pipeline, applied in order
+let selected = -1;    // which step the parameter controls are editing
+let stacking = false; // when on, clicking a mode appends instead of replacing
 let busy = false;
 
 // Each mode allows a different set of counts: the kaleidoscope needs an even
@@ -309,6 +350,120 @@ function syncControls(mode) {
 
 syncCountOptions(RADIAL_MODES[0]);
 syncControls(null);
+
+// ---- the effect chain -----------------------------------------------------
+
+function newStep(mode) {
+    const step = { mode };
+    if (hasCount(mode)) step.count = DEFAULT_COUNT_BY_MODE[mode];
+    if (isRadial(mode)) step.offset = 0;
+    if (hasTwist(mode)) step.twist = Number(twistInput.defaultValue);
+    return step;
+}
+
+// Point the shared controls at one particular step
+function loadControls(step) {
+    syncControls(step.mode);
+    if (hasCount(step.mode)) countSelect.value = String(step.count);
+    if (isRadial(step.mode)) {
+        offsetInput.value = String(step.offset);
+        offsetOut.textContent = step.offset + '°';
+    }
+    if (hasTwist(step.mode)) {
+        twistInput.value = String(step.twist);
+        twistOut.textContent = step.twist + '°';
+    }
+}
+
+function readControls(step) {
+    if (hasCount(step.mode)) step.count = Number(countSelect.value);
+    if (isRadial(step.mode)) step.offset = Number(offsetInput.value);
+    if (hasTwist(step.mode)) step.twist = Number(twistInput.value);
+}
+
+function stepLabel(step) {
+    let text = MODE_LABELS[step.mode];
+    if (hasCount(step.mode)) {
+        const n = step.count;
+        text += GRID_MODES.includes(step.mode)
+            ? ` ${n}×${n}${COUNT_UNITS[step.mode]}`
+            : ` ${n}${COUNT_UNITS[step.mode]}`;
+    }
+    if (isRadial(step.mode) && step.offset) text += ` ${step.offset}°`;
+    if (hasTwist(step.mode)) text += ` 扭${step.twist}°`;
+    return text;
+}
+
+function renderChain() {
+    chainBox.innerHTML = '';
+    chain.forEach((step, i) => {
+        if (i) {
+            const arrow = document.createElement('span');
+            arrow.className = 'arrow';
+            arrow.textContent = '→';
+            chainBox.append(arrow);
+        }
+        const chip = document.createElement('button');
+        chip.className = 'chip' + (i === selected ? ' sel' : '');
+        chip.dataset.index = String(i);
+        const name = document.createElement('span');
+        name.textContent = stepLabel(step);
+        const kill = document.createElement('span');
+        kill.className = 'x';
+        kill.textContent = '✕';
+        kill.title = '移除这一步';
+        chip.append(name, kill);
+        chip.addEventListener('click', (e) => {
+            if (e.target === kill) removeStep(i);
+            else selectStep(i);
+        });
+        chainBox.append(chip);
+    });
+    clearBtn.classList.toggle('hide', chain.length === 0);
+    // the mode buttons highlight whatever is in the chain
+    modeButtons.forEach(b =>
+        b.classList.toggle('on', chain.some(s => s.mode === b.dataset.mode)));
+}
+
+function selectStep(i) {
+    selected = i;
+    loadControls(chain[i]);
+    renderChain();
+}
+
+function removeStep(i) {
+    chain.splice(i, 1);
+    if (!chain.length) {
+        selected = -1;
+        syncControls(null);
+        renderChain();
+        outImg.style.display = 'none';
+        outMeta.textContent = '选一个效果';
+        dlLink.classList.add('off');
+        return;
+    }
+    selected = Math.min(selected, chain.length - 1);
+    loadControls(chain[selected]);
+    renderChain();
+    runChain();
+}
+
+function pickMode(mode) {
+    if (busy) return;
+    if (!stacking || chain.length === 0) {
+        chain = [newStep(mode)];
+    } else if (chain.length < MAX_STEPS) {
+        chain.push(newStep(mode));
+    } else {
+        showError(`最多叠加 ${MAX_STEPS} 个效果`);
+        return;
+    }
+    clearError();
+    selected = chain.length - 1;
+    loadControls(chain[selected]);
+    renderChain();
+    runChain();
+}
 
 function showError(msg) {
     err.textContent = msg;
@@ -346,9 +501,10 @@ async function upload(file) {
         outImg.style.display = 'none';
         outMeta.textContent = '选一个效果';
         dlLink.classList.add('off');
-        activeMode = null;
+        chain = [];
+        selected = -1;
         syncControls(null);
-        modeButtons.forEach(b => b.classList.remove('on'));
+        renderChain();
         work.style.display = 'block';
     } catch (e) {
         showError('上传失败：' + e.message);
@@ -357,41 +513,24 @@ async function upload(file) {
     }
 }
 
-async function doFlip(mode, button) {
-    if (!current || busy) return;
+async function runChain() {
+    if (!current || busy || !chain.length) return;
     clearError();
     setBusy(true);
-    activeMode = mode;
-    modeButtons.forEach(b => b.classList.toggle('on', b === button));
-    syncControls(mode);
-
-    const payload = { id: current.id, mode };
-    if (hasCount(mode)) payload.count = Number(countSelect.value);
-    if (isRadial(mode)) payload.offset = Number(offsetInput.value);
-    if (hasTwist(mode)) payload.twist = Number(twistInput.value);
 
     try {
         const res = await fetch('/api/flip', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(payload)
+            body: JSON.stringify({ id: current.id, steps: chain })
         });
         const data = await res.json().catch(() => ({ ok: false, error: `处理失败（HTTP ${res.status}）` }));
         if (!data.ok) { showError(data.error); return; }
 
         outImg.src = data.url;
         outImg.style.display = 'block';
-        // Radial and diagonal modes crop to a centred square, so the size can change
-        let label = button.textContent.trim();
-        // Grid modes count cells per side, so spell out the whole n x n grid
-        if (hasCount(mode)) {
-            const n = payload.count;
-            label += GRID_MODES.includes(mode)
-                ? ` ${n}×${n} ${COUNT_UNITS[mode]}`
-                : ` ${n} ${COUNT_UNITS[mode]}`;
-        }
-        if (isRadial(mode)) label += ` · ${payload.offset}°`;
-        if (hasTwist(mode)) label += ` · 扭 ${payload.twist}°`;
+        // Several modes crop to a centred square, so report the output size too
+        let label = chain.map(stepLabel).join(' → ');
         if (data.width && data.height) label += ` · ${data.width}×${data.height}`;
         outMeta.textContent = label;
         dlLink.href = data.download_url;
@@ -423,32 +562,54 @@ document.addEventListener('paste', e => {
     if (item) upload(item.getAsFile());
 });
 
-modeButtons.forEach(b => b.addEventListener('click', () => doFlip(b.dataset.mode, b)));
+modeButtons.forEach(b => b.addEventListener('click', () => pickMode(b.dataset.mode)));
 
-// Changing a parameter re-renders in place, but only when the mode currently
-// on screen actually uses that parameter.
-function rerender(applies) {
-    if (!applies(activeMode)) return;
-    doFlip(activeMode, modeButtons.find(b => b.dataset.mode === activeMode));
+stackBtn.addEventListener('click', () => {
+    stacking = !stacking;
+    stackBtn.classList.toggle('on', stacking);
+});
+
+clearBtn.addEventListener('click', () => {
+    chain = [];
+    selected = -1;
+    syncControls(null);
+    renderChain();
+    outImg.style.display = 'none';
+    outMeta.textContent = '选一个效果';
+    dlLink.classList.add('off');
+    clearError();
+});
+
+// Editing a parameter writes back to the selected step, then re-runs the
+// whole chain. Only fires when that step actually uses the parameter.
+function editSelected(applies) {
+    if (selected < 0 || !applies(chain[selected].mode)) return;
+    readControls(chain[selected]);
+    renderChain();
+    runChain();
 }
-countSelect.addEventListener('change', () => rerender(hasCount));
+countSelect.addEventListener('change', () => editSelected(hasCount));
 
 // 'input' fires continuously while dragging, so only track the readout there
 // and wait for 'change' (pointer release) before hitting the server.
 offsetInput.addEventListener('input', () => {
     offsetOut.textContent = offsetInput.value + '°';
 });
-offsetInput.addEventListener('change', () => rerender(isRadial));
+offsetInput.addEventListener('change', () => editSelected(isRadial));
 
 twistInput.addEventListener('input', () => {
     twistOut.textContent = twistInput.value + '°';
 });
-twistInput.addEventListener('change', () => rerender(hasTwist));
+twistInput.addEventListener('change', () => editSelected(hasTwist));
 
 $('reset').addEventListener('click', () => {
     current = null;
-    activeMode = null;
+    chain = [];
+    selected = -1;
+    stacking = false;
+    stackBtn.classList.remove('on');
     syncControls(null);
+    renderChain();
     work.style.display = 'none';
     clearError();
     window.scrollTo({ top: 0, behavior: 'smooth' });
