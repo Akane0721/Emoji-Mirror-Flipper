@@ -14,21 +14,11 @@ from threading import Timer
 from flask import Flask, abort, jsonify, render_template, request, send_file
 from PIL import Image
 
-from mirror import (DEFAULT_OFFSET, DEFAULT_SEGMENTS, DIRECTIONS, KALEIDO,
-                    MODE_LABELS, MODES, OFFSET_STEP, PINWHEEL, QUAD,
-                    RADIAL_MODES, SEGMENTS_BY_MODE, MirrorError, check_offset,
-                    check_segments, flip, parse_variant, probe, variant_key)
-
-# Plain names for download filenames; MODE_LABELS carries emoji for the UI.
-DOWNLOAD_NAMES = {
-    "l2r": "左右对称",
-    "r2l": "右左对称",
-    "t2b": "上下对称",
-    "b2t": "下上对称",
-    QUAD: "四象限",
-    KALEIDO: "万花筒",
-    PINWHEEL: "风车",
-}
+from mirror import (COUNT_LABELS, COUNT_MODES, COUNT_UNITS, COUNTS_BY_MODE,
+                    DEFAULT_OFFSET, MODE_FILENAMES, MODE_LABELS, MODES,
+                    OFFSET_STEP, PLAIN_MODES, RADIAL_MODES, MirrorError,
+                    check_count, check_offset, default_count, flip,
+                    parse_variant, probe, variant_key)
 
 BASE_DIR = Path(__file__).resolve().parent
 UPLOAD_DIR = BASE_DIR / "uploads"
@@ -95,12 +85,15 @@ def _source_path(file_id: str) -> Path:
 
 def _page_context() -> dict:
     return {
-        # First row: everything that keeps the source's aspect ratio.
-        "plain_modes": [(key, MODE_LABELS[key]) for key in DIRECTIONS + (QUAD,)],
-        # Second row: the radial modes, which share the segment and angle controls.
-        "radial_modes": [(key, MODE_LABELS[key]) for key in RADIAL_MODES],
-        "segments_by_mode": {m: list(s) for m, s in SEGMENTS_BY_MODE.items()},
-        "default_segments": DEFAULT_SEGMENTS,
+        # First row: the modes with no parameters.
+        "plain_modes": [(key, MODE_LABELS[key]) for key in PLAIN_MODES],
+        # Second row: the modes that share the numeric selector.
+        "count_modes": [(key, MODE_LABELS[key]) for key in COUNT_MODES],
+        "counts_by_mode": {m: list(v) for m, v in COUNTS_BY_MODE.items()},
+        "default_count_by_mode": {m: default_count(m) for m in COUNT_MODES},
+        "count_labels": COUNT_LABELS,
+        "count_units": COUNT_UNITS,
+        "radial_modes": list(RADIAL_MODES),
         "offset_step": OFFSET_STEP,
         "default_offset": DEFAULT_OFFSET,
         "max_mb": MAX_UPLOAD_BYTES // (1024 * 1024),
@@ -164,16 +157,18 @@ def api_flip():
     if mode not in MODES:
         return jsonify(ok=False, error="处理方式不对"), 400
 
-    segments = offset = None
-    if mode in RADIAL_MODES:
+    count = offset = None
+    if mode in COUNT_MODES:
         try:
-            segments = int(payload.get("segments", DEFAULT_SEGMENTS))
+            count = int(payload.get("count", default_count(mode)))
             offset = int(payload.get("offset", DEFAULT_OFFSET))
         except (TypeError, ValueError):
-            return jsonify(ok=False, error="瓣数和起始角得是数字"), 400
+            return jsonify(ok=False, error="参数得是数字"), 400
+        if mode not in RADIAL_MODES:
+            offset = 0  # only the radial modes have a start angle
         try:
-            check_segments(mode, segments)
-            check_offset(offset)
+            check_count(mode, count)
+            check_offset(mode, offset)
         except MirrorError as exc:
             return jsonify(ok=False, error=str(exc)), 400
 
@@ -183,13 +178,13 @@ def api_flip():
     except MirrorError as exc:
         return jsonify(ok=False, error=str(exc)), 400
 
-    variant = variant_key(mode, segments, offset)
+    variant = variant_key(mode, count, offset)
     OUTPUT_DIR.mkdir(exist_ok=True)
     dst = OUTPUT_DIR / f"{file_id}_{variant}.{info.ext}"
 
     if not dst.exists():
         try:
-            flip(src, dst, mode, info.animated, segments=segments, offset=offset)
+            flip(src, dst, mode, info.animated, count=count, offset=offset)
         except MirrorError as exc:
             return jsonify(ok=False, error=str(exc)), 400
 
@@ -219,27 +214,29 @@ def media_src(file_id: str):
 def _output_path(file_id: str, variant: str) -> tuple[Path, str, int | None, int | None]:
     """Resolve a rendered output, rejecting anything we didn't produce."""
     try:
-        mode, segments, offset = parse_variant(variant)
+        mode, count, offset = parse_variant(variant)
     except MirrorError:
         abort(404)
     path = _find(OUTPUT_DIR, f"{_check_id(file_id)}_{variant}")
     if path is None:
         abort(404)
-    return path, mode, segments, offset
+    return path, mode, count, offset
 
 
 @app.get("/media/out/<file_id>/<variant>")
 def media_out(file_id: str, variant: str):
-    path, _mode, _segments, _offset = _output_path(file_id, variant)
+    path, _mode, _count, _offset = _output_path(file_id, variant)
     return send_file(path)
 
 
 @app.get("/download/<file_id>/<variant>")
 def download(file_id: str, variant: str):
-    path, mode, segments, offset = _output_path(file_id, variant)
-    name = DOWNLOAD_NAMES[mode]
+    path, mode, count, offset = _output_path(file_id, variant)
+    name = MODE_FILENAMES[mode]
     if mode in RADIAL_MODES:
-        name = f"{name}{segments}瓣{offset}度"
+        name = f"{name}{count}{COUNT_UNITS[mode]}{offset}度"
+    elif mode in COUNT_MODES:
+        name = f"{name}{count}{COUNT_UNITS[mode]}"
     return send_file(path, as_attachment=True, download_name=f"{name}{path.suffix}")
 
 

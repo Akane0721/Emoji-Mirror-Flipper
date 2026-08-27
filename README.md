@@ -22,11 +22,19 @@ python app.py
 
 * 拖拽、点击选择、或者直接 `Ctrl+V` 粘贴图片
 * 支持 **jpg / png / gif / webp**，单文件上限 25MB
-* 四个方向：左→右、右→左、上→下、下→上
-* **四象限**：左右加上下一起对称，保持原图宽高比
-* **万花筒**：4 / 6 / 8 / 12 / 16 瓣
-* **风车**：只旋转不镜像，有旋向；支持 3 / 5 这类奇数叶
-* **起始角**：决定从源图哪一瓣扇形取样，拖动滑块即可换出完全不同的花纹
+十种对称方式：
+
+| 效果 | 说明 | 输出尺寸 |
+|---|---|---|
+| ➡️⬅️⬇️⬆️ 单轴对称 | 左→右、右→左、上→下、下→上 | 保持原比例 |
+| ↘️↗️ 对角对称 | 沿主对角线或副对角线翻折 | 正方形 |
+| 🪟 四重存在 | 左右加上下，四个象限全对称 | 保持原比例 |
+| 🔮 万华镜 | n 重二面体对称，4 / 6 / 8 / 12 / 16 瓣 | 正方形 |
+| 🌀 风车 | 只旋转不镜像，有旋向；支持 3 / 5 奇数叶 | 正方形 |
+| 🧱 镜面平铺 | 缩小后镜像铺满，2 / 3 / 4 / 6 次重复 | 保持原比例 |
+
+万华镜和风车还能调**起始角**，决定从源图哪一瓣扇形取样，拖动滑块即可换出完全不同的花纹。
+
 * 切效果即时预览，原图和结果并排对比，透明区域用棋盘格衬底显示
 * 一键下载
 * 动图保留原本的**帧间隔**和循环次数，透明通道不会变黑
@@ -59,20 +67,22 @@ uploads/ output/    运行时临时文件，自动清理
 
 ```python
 from pathlib import Path
-from mirror import KALEIDO, PINWHEEL, QUAD, flip, probe
+from mirror import KALEIDO, PINWHEEL, QUAD, TILE, flip, probe
 
 src = Path("target.gif")
 info = probe(src)                                  # validates that it really is an image
 
 flip(src, Path("out.gif"), "l2r", info.animated)                 # 单轴镜像
-flip(src, Path("quad.gif"), QUAD, info.animated)                 # 四象限
-flip(src, Path("kal.gif"), KALEIDO, info.animated,               # 万花筒
-     segments=8, offset=45)
+flip(src, Path("diag.gif"), "d1", info.animated)                 # 主对角
+flip(src, Path("quad.gif"), QUAD, info.animated)                 # 四重存在
+flip(src, Path("tile.gif"), TILE, info.animated, count=3)        # 镜面平铺
+flip(src, Path("kal.gif"), KALEIDO, info.animated,               # 万华镜
+     count=8, offset=45)
 flip(src, Path("pw.gif"), PINWHEEL, info.animated,               # 风车
-     segments=5, offset=0)
+     count=5, offset=0)
 ```
 
-## 万花筒和风车是怎么做的
+## 万华镜和风车是怎么做的
 
 两者共用同一套径向合成流程，区别只在中间那一步镜像。
 
@@ -91,7 +101,33 @@ flip(src, Path("pw.gif"), PINWHEEL, info.animated,               # 风车
 * 楔形遮罩在 4 倍尺寸下绘制再缩回，避免两条放射状边缘出现锯齿。
 * 合成在放大 √2 倍的画布上进行，最后才裁回原尺寸。否则从边缘中点方向取的楔块只有 `size/2` 的半径，而输出的四角在 `size×0.707` 处，凡是旋转步长不是 90° 整数倍的瓣数都会把空白转进角落。
 
+## 镜面平铺是怎么做的
+
+把整张图缩到 `1/n`，然后铺 `n×n` 份，**相邻两格互为镜像**：奇数列水平翻转、奇数行垂直翻转。这样任意两格交界处的那一列（或一行）像素完全相同，接缝看不出来。直接重复而不翻转的话，每条缝都会是一道硬边。
+
+输出保持原图尺寸和宽高比，所以适合万华镜裁成正方形后就没剩什么内容的横图或竖图。
+
 ## 更新记录
+
+### 2026-08-26（二）
+
+新增两种对称方式，并统一了 UI 文案。
+
+**新增**
+
+* **对角对称**（`d1` / `d2`）：沿主对角线或副对角线翻折。用 Pillow 的 `TRANSPOSE` / `TRANSVERSE` 取得反射，再用抗锯齿三角遮罩盖住一半。需要正方形，所以裁成中心正方形
+* **镜面平铺**（`TILE`）：缩到 `1/n` 后铺 `n×n` 份，相邻格互为镜像，接缝无缝。2 / 3 / 4 / 6 次可选，**保持原图宽高比**
+
+**文案**
+
+* 四个单轴方向加上箭头 emoji；「四象限」改为 **🪟 四重存在**；「万花筒」改为 **🔮 万华镜**
+* 数值选择器的标签随模式变化（瓣数 / 叶数 / 重复），不适用的控件会变暗
+* 下载文件名用简短单位（`万华镜12瓣45度.png`），不再是拗口的「12瓣数45度」
+
+**内部**
+
+* API 参数 `segments` 泛化为 `count`，因为平铺数的不是瓣而是重复次数
+* 模式按有无参数分成 `PLAIN_MODES` 和 `COUNT_MODES`；起始角只对径向模式有效，其他模式传了会被拒绝，variant 里也强制为 0
 
 ### 2026-08-26
 

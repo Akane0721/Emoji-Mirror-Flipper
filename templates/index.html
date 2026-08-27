@@ -171,14 +171,14 @@
         </div>
 
         <div class="bar advanced">
-            {% for key, label in radial_modes %}
+            {% for key, label in count_modes %}
             <button class="mode" data-mode="{{ key }}">{{ label }}</button>
             {% endfor %}
-            <label class="seg">
-                瓣数
-                <select id="segments"></select>
+            <label class="seg" id="countCtl">
+                <span id="countLabel">瓣数</span>
+                <select id="count"></select>
             </label>
-            <label class="seg">
+            <label class="seg" id="offsetCtl">
                 起始角
                 <input type="range" id="offset" min="0" max="{{ 360 - offset_step }}"
                        step="{{ offset_step }}" value="{{ default_offset }}">
@@ -207,46 +207,54 @@
 </div>
 
 <script>
-const SEGMENTS_BY_MODE = {{ segments_by_mode | tojson }};
-const DEFAULT_SEGMENTS = {{ default_segments | tojson }};
+const COUNTS_BY_MODE = {{ counts_by_mode | tojson }};
+const DEFAULT_COUNT_BY_MODE = {{ default_count_by_mode | tojson }};
+const COUNT_LABELS = {{ count_labels | tojson }};
+const COUNT_UNITS = {{ count_units | tojson }};
+const RADIAL_MODES = {{ radial_modes | tojson }};
 
 const $ = (id) => document.getElementById(id);
 const drop = $('drop'), fileInput = $('file'), work = $('work'), err = $('err');
 const srcImg = $('src'), outImg = $('out'), srcMeta = $('srcMeta'), outMeta = $('outMeta');
 const dlLink = $('dl'), spin = $('spin');
-const segSelect = $('segments'), offsetInput = $('offset'), offsetOut = $('offsetOut');
+const countSelect = $('count'), countLabel = $('countLabel'), countCtl = $('countCtl');
+const offsetInput = $('offset'), offsetOut = $('offsetOut'), offsetCtl = $('offsetCtl');
 const modeButtons = [...document.querySelectorAll('.mode')];
 
-const isRadial = (mode) => Object.prototype.hasOwnProperty.call(SEGMENTS_BY_MODE, mode);
+const hasCount = (mode) => Object.prototype.hasOwnProperty.call(COUNTS_BY_MODE, mode);
+const isRadial = (mode) => RADIAL_MODES.includes(mode);
 
 let current = null;    // the current upload: {id, animated, ...}
-let activeMode = null; // so changing segments/offset can re-render in place
+let activeMode = null; // so changing a parameter can re-render in place
 let busy = false;
 
-// The kaleidoscope needs an even segment count; the pinwheel doesn't, so it
-// offers 3 and 5 as well. Rebuild the options per mode, keeping the current
-// value when it's still valid.
-function syncSegmentOptions(mode) {
-    const allowed = SEGMENTS_BY_MODE[mode] || [];
-    const wanted = Number(segSelect.value) || DEFAULT_SEGMENTS;
-    const keep = allowed.includes(wanted) ? wanted : DEFAULT_SEGMENTS;
-    segSelect.innerHTML = '';
+// Each mode allows a different set of counts: the kaleidoscope needs an even
+// number, the pinwheel doesn't (so it offers 3 and 5), and the tiling counts
+// repeats instead of segments. Rebuild the options per mode, keeping the
+// current value whenever it is still valid.
+function syncCountOptions(mode) {
+    const allowed = COUNTS_BY_MODE[mode] || [];
+    const fallback = DEFAULT_COUNT_BY_MODE[mode];
+    const wanted = Number(countSelect.value);
+    const keep = allowed.includes(wanted) ? wanted : fallback;
+    countSelect.innerHTML = '';
     for (const n of allowed) {
         const opt = document.createElement('option');
         opt.value = String(n);
         opt.textContent = String(n);
         if (n === keep) opt.selected = true;
-        segSelect.append(opt);
+        countSelect.append(opt);
     }
+    countLabel.textContent = COUNT_LABELS[mode] || '瓣数';
 }
 
 function syncControls(mode) {
-    const on = isRadial(mode);
-    document.querySelectorAll('.seg').forEach(el => el.classList.toggle('dim', !on));
-    if (on) syncSegmentOptions(mode);
+    countCtl.classList.toggle('dim', !hasCount(mode));
+    offsetCtl.classList.toggle('dim', !isRadial(mode));
+    if (hasCount(mode)) syncCountOptions(mode);
 }
 
-syncSegmentOptions('{{ radial_modes[0][0] }}');
+syncCountOptions(RADIAL_MODES[0]);
 syncControls(null);
 
 function showError(msg) {
@@ -260,7 +268,7 @@ function setBusy(state) {
     busy = state;
     spin.classList.toggle('show', state);
     modeButtons.forEach(b => b.disabled = state);
-    segSelect.disabled = state;
+    countSelect.disabled = state;
     offsetInput.disabled = state;
 }
 
@@ -304,10 +312,8 @@ async function doFlip(mode, button) {
     syncControls(mode);
 
     const payload = { id: current.id, mode };
-    if (isRadial(mode)) {
-        payload.segments = Number(segSelect.value);
-        payload.offset = Number(offsetInput.value);
-    }
+    if (hasCount(mode)) payload.count = Number(countSelect.value);
+    if (isRadial(mode)) payload.offset = Number(offsetInput.value);
 
     try {
         const res = await fetch('/api/flip', {
@@ -320,9 +326,10 @@ async function doFlip(mode, button) {
 
         outImg.src = data.url;
         outImg.style.display = 'block';
-        // Radial modes crop to a centred square, so the size can change
+        // Radial and diagonal modes crop to a centred square, so the size can change
         let label = button.textContent.trim();
-        if (isRadial(mode)) label += ` ${payload.segments} 瓣 · ${payload.offset}°`;
+        if (hasCount(mode)) label += ` ${payload.count} ${COUNT_UNITS[mode]}`;
+        if (isRadial(mode)) label += ` · ${payload.offset}°`;
         if (data.width && data.height) label += ` · ${data.width}×${data.height}`;
         outMeta.textContent = label;
         dlLink.href = data.download_url;
@@ -356,20 +363,20 @@ document.addEventListener('paste', e => {
 
 modeButtons.forEach(b => b.addEventListener('click', () => doFlip(b.dataset.mode, b)));
 
-// Changing a parameter re-renders in place, but only when a radial mode is
-// what's currently on screen.
-function rerenderRadial() {
-    if (!isRadial(activeMode)) return;
+// Changing a parameter re-renders in place, but only when the mode currently
+// on screen actually uses that parameter.
+function rerender(applies) {
+    if (!applies(activeMode)) return;
     doFlip(activeMode, modeButtons.find(b => b.dataset.mode === activeMode));
 }
-segSelect.addEventListener('change', rerenderRadial);
+countSelect.addEventListener('change', () => rerender(hasCount));
 
 // 'input' fires continuously while dragging, so only track the readout there
 // and wait for 'change' (pointer release) before hitting the server.
 offsetInput.addEventListener('input', () => {
     offsetOut.textContent = offsetInput.value + '°';
 });
-offsetInput.addEventListener('change', rerenderRadial);
+offsetInput.addEventListener('change', () => rerender(isRadial));
 
 $('reset').addEventListener('click', () => {
     current = null;
