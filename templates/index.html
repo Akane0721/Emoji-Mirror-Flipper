@@ -60,11 +60,31 @@
 
     /* Work area */
     #work { display: none; margin-top: 24px; }
-    .bar {
-        display: flex; flex-wrap: wrap; gap: 8px;
-        align-items: center; justify-content: center;
-        margin-bottom: 18px;
+
+    /* Control panel: one labelled row per group, parameters in their own row */
+    .panel {
+        background: var(--card);
+        border: 1px solid var(--line);
+        border-radius: 14px;
+        box-shadow: var(--shadow);
+        padding: 2px 18px;
+        margin-bottom: 20px;
     }
+    .row {
+        display: grid;
+        grid-template-columns: 3em 1fr;
+        align-items: center;
+        gap: 14px;
+        padding: 11px 0;
+    }
+    .row + .row { border-top: 1px solid color-mix(in srgb, var(--line) 55%, transparent); }
+    .row.hide { display: none; }
+    .rlabel {
+        font-size: .74rem; letter-spacing: .12em;
+        color: var(--muted); text-align: right; user-select: none;
+    }
+    .chips { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+
     button {
         font: inherit;
         padding: 8px 16px;
@@ -80,25 +100,37 @@
     button:disabled { opacity: .5; cursor: default; }
     button.ghost { border-style: dashed; }
 
-    /* Kaleidoscope row */
-    .advanced { margin-top: -6px; }
-    .seg { display: inline-flex; align-items: center; gap: 6px; font-size: .85rem; color: var(--muted); }
-    .seg select {
-        font: inherit;
-        padding: 6px 10px;
+    /* Mode chips sit tighter than the action buttons below the panes */
+    button.mode {
+        padding: 6px 13px;
+        font-size: .88rem;
+        border-radius: 9px;
+        background: transparent;
+    }
+    button.mode.on { background: var(--accent); }
+
+    .ctl {
+        display: inline-flex; align-items: center; gap: 7px;
+        font-size: .82rem; color: var(--muted);
+        padding-right: 4px;
+    }
+    .ctl.hide { display: none; }
+    .ctl select {
+        font: inherit; font-size: .85rem;
+        padding: 5px 9px;
         border: 1px solid var(--line);
-        border-radius: 999px;
+        border-radius: 8px;
         background: var(--card);
         color: var(--text);
         cursor: pointer;
     }
-    .seg select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-    .seg input[type="range"] { width: 110px; accent-color: var(--accent); cursor: pointer; }
-    .seg output {
-        min-width: 3.2em; text-align: right;
+    .ctl select:focus-visible,
+    .ctl input:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+    .ctl input[type="range"] { width: 104px; accent-color: var(--accent); cursor: pointer; }
+    .ctl output {
+        min-width: 3.4em; text-align: right;
         font-variant-numeric: tabular-nums; color: var(--text);
     }
-    .seg.dim { opacity: .45; }
 
     .panes { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
     @media (max-width: 620px) { .panes { grid-template-columns: 1fr; } }
@@ -112,7 +144,8 @@
     }
     .pane h2 {
         margin: 0 0 10px; font-size: .8rem; font-weight: 600;
-        text-transform: uppercase; letter-spacing: .06em; color: var(--muted);
+        letter-spacing: .06em; color: var(--muted);
+        display: flex; align-items: center; justify-content: space-between;
     }
     .frame {
         display: flex; align-items: center; justify-content: center;
@@ -163,33 +196,39 @@
     <div id="err"></div>
 
     <div id="work">
-        <div class="bar">
-            {% for key, label in axis_modes %}
-            <button class="mode" data-mode="{{ key }}">{{ label }}</button>
+        <div class="panel">
+            {% for group in mode_groups %}
+            <div class="row">
+                <span class="rlabel">{{ group.label }}</span>
+                <div class="chips">
+                    {% for key, label in group.modes %}
+                    <button class="mode" data-mode="{{ key }}">{{ label }}</button>
+                    {% endfor %}
+                </div>
+            </div>
             {% endfor %}
-            <span id="spin">处理中…</span>
-        </div>
 
-        <div class="bar advanced">
-            {% for key, label in fold_modes %}
-            <button class="mode" data-mode="{{ key }}">{{ label }}</button>
-            {% endfor %}
-        </div>
-
-        <div class="bar advanced">
-            {% for key, label in count_modes %}
-            <button class="mode" data-mode="{{ key }}">{{ label }}</button>
-            {% endfor %}
-            <label class="seg" id="countCtl">
-                <span id="countLabel">瓣数</span>
-                <select id="count"></select>
-            </label>
-            <label class="seg" id="offsetCtl">
-                起始角
-                <input type="range" id="offset" min="0" max="{{ 360 - offset_step }}"
-                       step="{{ offset_step }}" value="{{ default_offset }}">
-                <output id="offsetOut">{{ default_offset }}°</output>
-            </label>
+            <div class="row hide" id="paramRow">
+                <span class="rlabel">参数</span>
+                <div class="chips">
+                    <label class="ctl" id="countCtl">
+                        <span id="countLabel">瓣数</span>
+                        <select id="count"></select>
+                    </label>
+                    <label class="ctl" id="offsetCtl">
+                        起始角
+                        <input type="range" id="offset" min="0" max="{{ 360 - offset_step }}"
+                               step="{{ offset_step }}" value="{{ default_offset }}">
+                        <output id="offsetOut">{{ default_offset }}°</output>
+                    </label>
+                    <label class="ctl" id="twistCtl">
+                        扭曲
+                        <input type="range" id="twist" min="0" max="{{ max_twist }}"
+                               step="{{ twist_step }}" value="{{ default_twist }}">
+                        <output id="twistOut">{{ default_twist }}°</output>
+                    </label>
+                </div>
+            </div>
         </div>
 
         <div class="panes">
@@ -199,9 +238,9 @@
                 <div class="meta" id="srcMeta"></div>
             </div>
             <div class="pane">
-                <h2>结果</h2>
+                <h2>结果 <span id="spin">处理中…</span></h2>
                 <div class="frame"><img id="out" alt="结果" style="display:none"></div>
-                <div class="meta" id="outMeta">选一个方向</div>
+                <div class="meta" id="outMeta">选一个效果</div>
             </div>
         </div>
 
@@ -219,17 +258,20 @@ const COUNT_LABELS = {{ count_labels | tojson }};
 const COUNT_UNITS = {{ count_units | tojson }};
 const GRID_MODES = {{ grid_modes | tojson }};
 const RADIAL_MODES = {{ radial_modes | tojson }};
+const TWIST_MODES = {{ twist_modes | tojson }};
 
 const $ = (id) => document.getElementById(id);
 const drop = $('drop'), fileInput = $('file'), work = $('work'), err = $('err');
 const srcImg = $('src'), outImg = $('out'), srcMeta = $('srcMeta'), outMeta = $('outMeta');
-const dlLink = $('dl'), spin = $('spin');
+const dlLink = $('dl'), spin = $('spin'), paramRow = $('paramRow');
 const countSelect = $('count'), countLabel = $('countLabel'), countCtl = $('countCtl');
 const offsetInput = $('offset'), offsetOut = $('offsetOut'), offsetCtl = $('offsetCtl');
+const twistInput = $('twist'), twistOut = $('twistOut'), twistCtl = $('twistCtl');
 const modeButtons = [...document.querySelectorAll('.mode')];
 
 const hasCount = (mode) => Object.prototype.hasOwnProperty.call(COUNTS_BY_MODE, mode);
 const isRadial = (mode) => RADIAL_MODES.includes(mode);
+const hasTwist = (mode) => TWIST_MODES.includes(mode);
 
 let current = null;    // the current upload: {id, animated, ...}
 let activeMode = null; // so changing a parameter can re-render in place
@@ -255,9 +297,13 @@ function syncCountOptions(mode) {
     countLabel.textContent = COUNT_LABELS[mode] || '瓣数';
 }
 
+// Only show the controls the active mode actually uses; hide the whole
+// parameter row when it uses none, so the panel doesn't carry dead widgets.
 function syncControls(mode) {
-    countCtl.classList.toggle('dim', !hasCount(mode));
-    offsetCtl.classList.toggle('dim', !isRadial(mode));
+    countCtl.classList.toggle('hide', !hasCount(mode));
+    offsetCtl.classList.toggle('hide', !isRadial(mode));
+    twistCtl.classList.toggle('hide', !hasTwist(mode));
+    paramRow.classList.toggle('hide', !hasCount(mode));
     if (hasCount(mode)) syncCountOptions(mode);
 }
 
@@ -277,6 +323,7 @@ function setBusy(state) {
     modeButtons.forEach(b => b.disabled = state);
     countSelect.disabled = state;
     offsetInput.disabled = state;
+    twistInput.disabled = state;
 }
 
 async function upload(file) {
@@ -321,6 +368,7 @@ async function doFlip(mode, button) {
     const payload = { id: current.id, mode };
     if (hasCount(mode)) payload.count = Number(countSelect.value);
     if (isRadial(mode)) payload.offset = Number(offsetInput.value);
+    if (hasTwist(mode)) payload.twist = Number(twistInput.value);
 
     try {
         const res = await fetch('/api/flip', {
@@ -343,6 +391,7 @@ async function doFlip(mode, button) {
                 : ` ${n} ${COUNT_UNITS[mode]}`;
         }
         if (isRadial(mode)) label += ` · ${payload.offset}°`;
+        if (hasTwist(mode)) label += ` · 扭 ${payload.twist}°`;
         if (data.width && data.height) label += ` · ${data.width}×${data.height}`;
         outMeta.textContent = label;
         dlLink.href = data.download_url;
@@ -390,6 +439,11 @@ offsetInput.addEventListener('input', () => {
     offsetOut.textContent = offsetInput.value + '°';
 });
 offsetInput.addEventListener('change', () => rerender(isRadial));
+
+twistInput.addEventListener('input', () => {
+    twistOut.textContent = twistInput.value + '°';
+});
+twistInput.addEventListener('change', () => rerender(hasTwist));
 
 $('reset').addEventListener('click', () => {
     current = null;

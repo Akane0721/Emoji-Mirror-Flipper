@@ -23,21 +23,31 @@ DIAGONALS = ("d1", "d2")
 QUAD = "quad"
 KALEIDO = "kaleido"
 PINWHEEL = "pinwheel"
+SPIRAL = "spiral"
 TILE = "tile"
 PAPERCUT = "papercut"
 
-RADIAL_MODES = (KALEIDO, PINWHEEL)
+# Modes assembled from angular wedges around the centre.
+RADIAL_MODES = (KALEIDO, PINWHEEL, SPIRAL)
 # Modes whose count means "cells per side" rather than "segments".
 GRID_MODES = (TILE, PAPERCUT)
 # Modes that take a numeric parameter from the same selector.
 COUNT_MODES = RADIAL_MODES + GRID_MODES
-# The UI splits the parameterless modes into two rows: single-axis folds, then
-# the ones that fold more than one axis at once.
+# Only the spiral has a twist amount on top of count and start angle.
+TWIST_MODES = (SPIRAL,)
+# Modes with no parameters at all.
 AXIS_MODES = DIRECTIONS
 FOLD_MODES = DIAGONALS + (QUAD,)
 PLAIN_MODES = AXIS_MODES + FOLD_MODES
 
 MODES = PLAIN_MODES + COUNT_MODES
+
+# How the UI groups the buttons, in display order.
+MODE_GROUPS = (
+    ("单轴", AXIS_MODES),
+    ("折叠", FOLD_MODES),
+    ("图案", (KALEIDO, PINWHEEL, SPIRAL, TILE, PAPERCUT)),
+)
 
 MODE_LABELS = {
     "l2r": "➡️ 左→右",
@@ -49,6 +59,7 @@ MODE_LABELS = {
     QUAD: "🪟 四重存在",
     KALEIDO: "🔮 万华镜",
     PINWHEEL: "🌀 风车",
+    SPIRAL: "🌪️ 螺旋",
     TILE: "🧱 镜面平铺",
     PAPERCUT: "🪷 窗花",
 }
@@ -64,6 +75,7 @@ MODE_FILENAMES = {
     QUAD: "四重存在",
     KALEIDO: "万华镜",
     PINWHEEL: "风车",
+    SPIRAL: "螺旋",
     TILE: "镜面平铺",
     PAPERCUT: "窗花",
 }
@@ -74,15 +86,24 @@ MODE_FILENAMES = {
 COUNTS_BY_MODE = {
     KALEIDO: (4, 6, 8, 12, 16),
     PINWHEEL: (3, 4, 5, 6, 8, 12, 16),
+    SPIRAL: (2, 3, 4, 5, 6, 8, 12),
     TILE: (2, 3, 4, 6),
     PAPERCUT: (2, 3, 4, 6),
 }
-DEFAULT_COUNT_BY_MODE = {KALEIDO: 8, PINWHEEL: 8, TILE: 3, PAPERCUT: 3}
+DEFAULT_COUNT_BY_MODE = {KALEIDO: 8, PINWHEEL: 8, SPIRAL: 6, TILE: 3, PAPERCUT: 3}
 # The grid modes count cells per side rather than segments around a centre, so
 # their selector is labelled differently and their readouts spell out the whole
 # n x n grid instead of a bare number.
-COUNT_LABELS = {KALEIDO: "瓣数", PINWHEEL: "叶数", TILE: "格数", PAPERCUT: "格数"}
-COUNT_UNITS = {KALEIDO: "瓣", PINWHEEL: "叶", TILE: "格", PAPERCUT: "格"}
+COUNT_LABELS = {KALEIDO: "瓣数", PINWHEEL: "叶数", SPIRAL: "臂数",
+                TILE: "格数", PAPERCUT: "格数"}
+COUNT_UNITS = {KALEIDO: "瓣", PINWHEEL: "叶", SPIRAL: "臂",
+               TILE: "格", PAPERCUT: "格"}
+
+# Total twist in degrees, strongest at the centre and fading to nothing at the
+# rim so the frame edges stay put.
+TWIST_STEP = 15
+DEFAULT_TWIST = 180
+MAX_TWIST = 720
 
 
 def describe_count(mode: str, count: int) -> str:
@@ -107,6 +128,8 @@ MAX_PIXELS = 50_000_000  # decompression-bomb guard, roughly 7000x7000
 
 _PLAIN_RE = re.compile(r"\A(l2r|r2l|t2b|b2t|d1|d2|quad)\Z")
 _COUNT_RE = re.compile(r"\A(kaleido|pinwheel|tile|papercut)_(\d{1,2})_(\d{1,3})\Z")
+# The spiral carries a fourth field for its twist.
+_SPIRAL_RE = re.compile(r"\A(spiral)_(\d{1,2})_(\d{1,3})_(\d{1,3})\Z")
 
 
 class MirrorError(Exception):
@@ -135,21 +158,39 @@ def default_count(mode: str) -> int:
     return DEFAULT_COUNT_BY_MODE.get(mode, 8)
 
 
-def variant_key(mode: str, count: int | None = None, offset: int | None = None) -> str:
-    if mode in COUNT_MODES:
-        n = default_count(mode) if count is None else count
-        off = DEFAULT_OFFSET if offset is None else offset
-        if mode not in RADIAL_MODES:
-            off = 0  # only the radial modes have a start angle
-        return f"{mode}_{n}_{off}"
-    return mode
+def variant_key(
+    mode: str,
+    count: int | None = None,
+    offset: int | None = None,
+    twist: int | None = None,
+) -> str:
+    if mode not in COUNT_MODES:
+        return mode
+
+    n = default_count(mode) if count is None else count
+    off = DEFAULT_OFFSET if offset is None else offset
+    if mode not in RADIAL_MODES:
+        off = 0  # only the radial modes have a start angle
+    if mode in TWIST_MODES:
+        tw = DEFAULT_TWIST if twist is None else twist
+        return f"{mode}_{n}_{off}_{tw}"
+    return f"{mode}_{n}_{off}"
 
 
-def parse_variant(variant: str) -> tuple[str, int | None, int | None]:
-    """Turn a variant token back into (mode, count, offset), validating it."""
+def parse_variant(variant: str) -> tuple[str, int | None, int | None, int | None]:
+    """Turn a variant token back into (mode, count, offset, twist)."""
     variant = variant or ""
     if _PLAIN_RE.match(variant):
-        return variant, None, None
+        return variant, None, None, None
+
+    match = _SPIRAL_RE.match(variant)
+    if match is not None:
+        mode, count, offset, twist = (match.group(1), int(match.group(2)),
+                                      int(match.group(3)), int(match.group(4)))
+        check_count(mode, count)
+        check_offset(mode, offset)
+        check_twist(mode, twist)
+        return mode, count, offset, twist
 
     match = _COUNT_RE.match(variant)
     if match is None:
@@ -160,7 +201,7 @@ def parse_variant(variant: str) -> tuple[str, int | None, int | None]:
     offset = int(match.group(3))
     check_count(mode, count)
     check_offset(mode, offset)
-    return mode, count, offset
+    return mode, count, offset, None
 
 
 def check_count(mode: str, count: int) -> None:
@@ -177,6 +218,17 @@ def check_offset(mode: str, offset: int) -> None:
         return
     if not 0 <= offset < 360:
         raise MirrorError("起始角必须在 0 到 359 度之间")
+
+
+def check_twist(mode: str, twist: int) -> None:
+    if mode not in TWIST_MODES:
+        if twist:
+            raise MirrorError("这个模式没有扭曲")
+        return
+    if not 0 <= twist <= MAX_TWIST:
+        raise MirrorError(f"扭曲必须在 0 到 {MAX_TWIST} 度之间")
+    if twist % TWIST_STEP:
+        raise MirrorError(f"扭曲必须是 {TWIST_STEP} 的倍数")
 
 
 def probe(path: Path) -> ImageInfo:
@@ -398,7 +450,8 @@ def _wedge_mask(size: int, wedge_deg: float, start_deg: float) -> Image.Image:
 
 
 def _radial_frame(
-    frame: Image.Image, mode: str, segments: int, offset: int
+    frame: Image.Image, mode: str, segments: int, offset: int,
+    count_mode: str | None = None,
 ) -> Image.Image:
     """Build an n-fold radial pattern from a single frame.
 
@@ -411,8 +464,10 @@ def _radial_frame(
     n mirror lines through the centre. Rotation alone gives a pinwheel, which
     has a direction of spin and no mirror lines at all.
     """
-    check_count(mode, segments)
-    check_offset(mode, offset)
+    # The spiral builds on the pinwheel assembly but has its own allowed
+    # segment counts, so validation can target a different mode than the build.
+    check_count(count_mode or mode, segments)
+    check_offset(count_mode or mode, offset)
 
     base = _centre_square(frame)
     size = base.width
@@ -464,9 +519,85 @@ def _radial_frame(
     return out.crop((inset, inset, inset + size, inset + size))
 
 
-def _transform(
-    frame: Image.Image, mode: str, count: int | None, offset: int | None
+def _twist_frame(frame: Image.Image, degrees: int, cells: int = 56) -> Image.Image:
+    """Rotate each pixel about the centre by an amount that depends on radius.
+
+    Because the rotation only ever depends on the radius, the warp commutes
+    with rotation about the same centre -- so an n-fold pattern stays exactly
+    n-fold after twisting. That is what lets the spiral reuse the pinwheel
+    assembly and still count as a symmetry rather than a plain distortion.
+
+    The twist is strongest at the centre and fades to zero at the *inscribed*
+    circle, not at the corners. That boundary matters: rotation preserves
+    radius, so a point inside the inscribed circle always lands on another
+    point inside it, which is guaranteed to have source pixels. Fading out at
+    the corner radius instead would rotate near-corner points onto positions
+    the square doesn't cover, punching transparent holes into the result.
+
+    Implemented as one Pillow MESH transform over a `cells` x `cells` grid:
+    Pillow interpolates inside each quad in C, so this stays fast without
+    needing a per-pixel loop or numpy.
+    """
+    if not degrees:
+        return frame
+
+    width, height = frame.size
+    cx, cy = width / 2, height / 2
+    rim = min(cx, cy)
+    strength = math.radians(degrees)
+    falloff = math.log1p(rim)
+
+    def source(x: float, y: float) -> tuple[float, float]:
+        dx, dy = x - cx, y - cy
+        radius = math.hypot(dx, dy)
+        if radius < 1e-9:
+            return cx, cy
+        if radius >= rim:
+            return x, y
+        angle = math.atan2(dy, dx) + strength * (1 - math.log1p(radius) / falloff)
+        return cx + radius * math.cos(angle), cy + radius * math.sin(angle)
+
+    mesh = []
+    for row in range(cells):
+        y0, y1 = height * row / cells, height * (row + 1) / cells
+        for col in range(cells):
+            x0, x1 = width * col / cells, width * (col + 1) / cells
+            box = (int(x0), int(y0), math.ceil(x1), math.ceil(y1))
+            # Pillow wants the source quad as upper-left, lower-left,
+            # lower-right, upper-right.
+            quad = [
+                c
+                for point in (source(x0, y0), source(x0, y1),
+                              source(x1, y1), source(x1, y0))
+                for c in point
+            ]
+            mesh.append((box, quad))
+
+    return frame.transform(
+        (width, height), Image.MESH, mesh, resample=Image.BICUBIC
+    )
+
+
+def _spiral_frame(
+    frame: Image.Image, segments: int, offset: int, twist: int
 ) -> Image.Image:
+    """An n-armed pinwheel with a logarithmic twist applied on top."""
+    check_twist(SPIRAL, twist)
+    base = _radial_frame(frame, PINWHEEL, segments, offset, count_mode=SPIRAL)
+    return _twist_frame(base, twist)
+
+
+def _transform(
+    frame: Image.Image, mode: str, count: int | None, offset: int | None,
+    twist: int | None = None,
+) -> Image.Image:
+    if mode == SPIRAL:
+        return _spiral_frame(
+            frame,
+            default_count(SPIRAL) if count is None else count,
+            DEFAULT_OFFSET if offset is None else offset,
+            DEFAULT_TWIST if twist is None else twist,
+        )
     if mode in RADIAL_MODES:
         return _radial_frame(
             frame,
@@ -490,13 +621,14 @@ def _transform(
 # --------------------------------------------------------------------------
 
 def _flip_static(
-    src: Path, dst: Path, mode: str, count: int | None, offset: int | None
+    src: Path, dst: Path, mode: str, count: int | None, offset: int | None,
+    twist: int | None,
 ) -> None:
     with Image.open(src) as im:
         im.load()
         frame = im.convert("RGBA")
 
-    out = _transform(frame, mode, count, offset)
+    out = _transform(frame, mode, count, offset, twist)
 
     if dst.suffix.lower() in (".jpg", ".jpeg"):
         # JPEG has no alpha channel, so composite onto white first
@@ -508,7 +640,8 @@ def _flip_static(
 
 
 def _flip_animated(
-    src: Path, dst: Path, mode: str, count: int | None, offset: int | None
+    src: Path, dst: Path, mode: str, count: int | None, offset: int | None,
+    twist: int | None,
 ) -> None:
     frames: list[Image.Image] = []
     durations: list[int] = []
@@ -518,7 +651,7 @@ def _flip_animated(
         loop = im.info.get("loop", 0)
         for frame in ImageSequence.Iterator(im):
             # convert() composites the current frame per the GIF disposal rules
-            frames.append(_transform(frame.convert("RGBA"), mode, count, offset))
+            frames.append(_transform(frame.convert("RGBA"), mode, count, offset, twist))
             durations.append(frame.info.get("duration", default_duration))
 
     if not frames:
@@ -542,11 +675,12 @@ def flip(
     animated: bool,
     count: int | None = None,
     offset: int | None = None,
+    twist: int | None = None,
 ) -> None:
     """Transform src into dst. `animated` comes from probe().
 
-    `count` and `offset` only apply to the parameterised modes and fall back
-    to that mode's defaults.
+    `count`, `offset` and `twist` only apply to the modes that take them and
+    fall back to that mode's defaults.
     """
     if mode not in MODES:
         raise MirrorError(f"未知的处理方式：{mode}")
@@ -555,9 +689,9 @@ def flip(
     dst.parent.mkdir(parents=True, exist_ok=True)
     try:
         if animated:
-            _flip_animated(src, dst, mode, count, offset)
+            _flip_animated(src, dst, mode, count, offset, twist)
         else:
-            _flip_static(src, dst, mode, count, offset)
+            _flip_static(src, dst, mode, count, offset, twist)
     except MirrorError:
         raise
     except OSError as exc:

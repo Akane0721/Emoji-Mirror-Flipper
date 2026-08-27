@@ -14,12 +14,13 @@ from threading import Timer
 from flask import Flask, abort, jsonify, render_template, request, send_file
 from PIL import Image
 
-from mirror import (AXIS_MODES, COUNT_LABELS, COUNT_MODES, COUNT_UNITS,
-                    COUNTS_BY_MODE, DEFAULT_OFFSET, FOLD_MODES, GRID_MODES,
-                    MODE_FILENAMES, MODE_LABELS, MODES, OFFSET_STEP,
-                    RADIAL_MODES, MirrorError, check_count, check_offset,
-                    default_count, describe_count, flip, parse_variant, probe,
-                    variant_key)
+from mirror import (COUNT_LABELS, COUNT_MODES, COUNT_UNITS, COUNTS_BY_MODE,
+                    DEFAULT_COUNT_BY_MODE, DEFAULT_OFFSET,
+                    DEFAULT_TWIST, GRID_MODES, MAX_TWIST, MODE_FILENAMES,
+                    MODE_GROUPS, MODE_LABELS, MODES, OFFSET_STEP, RADIAL_MODES,
+                    TWIST_MODES, TWIST_STEP, MirrorError, check_count,
+                    check_offset, check_twist, default_count, describe_count,
+                    flip, parse_variant, probe, variant_key)
 
 BASE_DIR = Path(__file__).resolve().parent
 UPLOAD_DIR = BASE_DIR / "uploads"
@@ -86,12 +87,15 @@ def _source_path(file_id: str) -> Path:
 
 def _page_context() -> dict:
     return {
-        # Row 1: single-axis folds. Row 2: folds across more than one axis.
-        "axis_modes": [(key, MODE_LABELS[key]) for key in AXIS_MODES],
-        "fold_modes": [(key, MODE_LABELS[key]) for key in FOLD_MODES],
-        # Row 3: the modes that share the numeric selector.
-        "count_modes": [(key, MODE_LABELS[key]) for key in COUNT_MODES],
+        "mode_groups": [
+            {"label": label, "modes": [(k, MODE_LABELS[k]) for k in keys]}
+            for label, keys in MODE_GROUPS
+        ],
         "grid_modes": list(GRID_MODES),
+        "twist_modes": list(TWIST_MODES),
+        "twist_step": TWIST_STEP,
+        "default_twist": DEFAULT_TWIST,
+        "max_twist": MAX_TWIST,
         "counts_by_mode": {m: list(v) for m, v in COUNTS_BY_MODE.items()},
         "default_count_by_mode": {m: default_count(m) for m in COUNT_MODES},
         "count_labels": COUNT_LABELS,
@@ -160,18 +164,23 @@ def api_flip():
     if mode not in MODES:
         return jsonify(ok=False, error="处理方式不对"), 400
 
-    count = offset = None
+    count = offset = twist = None
     if mode in COUNT_MODES:
         try:
             count = int(payload.get("count", default_count(mode)))
             offset = int(payload.get("offset", DEFAULT_OFFSET))
+            twist = int(payload.get("twist", DEFAULT_TWIST))
         except (TypeError, ValueError):
             return jsonify(ok=False, error="参数得是数字"), 400
         if mode not in RADIAL_MODES:
             offset = 0  # only the radial modes have a start angle
+        if mode not in TWIST_MODES:
+            twist = None  # and only the spiral has a twist
         try:
             check_count(mode, count)
             check_offset(mode, offset)
+            if twist is not None:
+                check_twist(mode, twist)
         except MirrorError as exc:
             return jsonify(ok=False, error=str(exc)), 400
 
@@ -181,13 +190,14 @@ def api_flip():
     except MirrorError as exc:
         return jsonify(ok=False, error=str(exc)), 400
 
-    variant = variant_key(mode, count, offset)
+    variant = variant_key(mode, count, offset, twist)
     OUTPUT_DIR.mkdir(exist_ok=True)
     dst = OUTPUT_DIR / f"{file_id}_{variant}.{info.ext}"
 
     if not dst.exists():
         try:
-            flip(src, dst, mode, info.animated, count=count, offset=offset)
+            flip(src, dst, mode, info.animated,
+                 count=count, offset=offset, twist=twist)
         except MirrorError as exc:
             return jsonify(ok=False, error=str(exc)), 400
 
@@ -214,30 +224,31 @@ def media_src(file_id: str):
     return send_file(_source_path(file_id))
 
 
-def _output_path(file_id: str, variant: str) -> tuple[Path, str, int | None, int | None]:
+def _output_path(file_id: str, variant: str):
     """Resolve a rendered output, rejecting anything we didn't produce."""
     try:
-        mode, count, offset = parse_variant(variant)
+        mode, count, offset, twist = parse_variant(variant)
     except MirrorError:
         abort(404)
     path = _find(OUTPUT_DIR, f"{_check_id(file_id)}_{variant}")
     if path is None:
         abort(404)
-    return path, mode, count, offset
+    return path, mode, count, offset, twist
 
 
 @app.get("/media/out/<file_id>/<variant>")
 def media_out(file_id: str, variant: str):
-    path, _mode, _count, _offset = _output_path(file_id, variant)
-    return send_file(path)
+    return send_file(_output_path(file_id, variant)[0])
 
 
 @app.get("/download/<file_id>/<variant>")
 def download(file_id: str, variant: str):
-    path, mode, count, offset = _output_path(file_id, variant)
+    path, mode, count, offset, twist = _output_path(file_id, variant)
     name = MODE_FILENAMES[mode]
     if mode in RADIAL_MODES:
         name = f"{name}{describe_count(mode, count)}{offset}度"
+        if mode in TWIST_MODES:
+            name = f"{name}扭{twist}"
     elif mode in COUNT_MODES:
         name = f"{name}{describe_count(mode, count)}"
     return send_file(path, as_attachment=True, download_name=f"{name}{path.suffix}")
