@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import math
+import random
 import re
+import zlib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -26,13 +28,24 @@ PINWHEEL = "pinwheel"
 SPIRAL = "spiral"
 TILE = "tile"
 PAPERCUT = "papercut"
+GLITCH = "glitch"
+SPECTRUM = "spectrum"
+SCRAMBLE = "scramble"
 
 # Modes assembled from angular wedges around the centre.
 RADIAL_MODES = (KALEIDO, PINWHEEL, SPIRAL)
 # Modes whose count means "cells per side" rather than "segments".
 GRID_MODES = (TILE, PAPERCUT)
+# Modes whose count is a plain 1-5 intensity dial.
+LEVEL_MODES = (GLITCH, SPECTRUM, SCRAMBLE)
+# Modes that need numpy; imported lazily so the rest keeps working without it.
+FOURIER_MODES = (SPECTRUM, SCRAMBLE)
+# Modes that use a pseudo-random seed. It is derived from the parameters and
+# the frame index so a given variant always renders identically -- the output
+# cache is keyed on the variant, so non-determinism would be a real bug.
+SEEDED_MODES = (GLITCH, SCRAMBLE)
 # Modes that take a numeric parameter from the same selector.
-COUNT_MODES = RADIAL_MODES + GRID_MODES
+COUNT_MODES = RADIAL_MODES + GRID_MODES + LEVEL_MODES
 # Only the spiral has a twist amount on top of count and start angle.
 TWIST_MODES = (SPIRAL,)
 # Modes with no parameters at all.
@@ -47,6 +60,7 @@ MODE_GROUPS = (
     ("单轴", AXIS_MODES),
     ("折叠", FOLD_MODES),
     ("图案", (KALEIDO, PINWHEEL, SPIRAL, TILE, PAPERCUT)),
+    ("变换", LEVEL_MODES),
 )
 
 MODE_LABELS = {
@@ -62,6 +76,9 @@ MODE_LABELS = {
     SPIRAL: "🌪️ 螺旋",
     TILE: "🧱 镜面平铺",
     PAPERCUT: "🪷 窗花",
+    GLITCH: "📼 故障",
+    SPECTRUM: "📊 频谱",
+    SCRAMBLE: "🎞️ 相位打乱",
 }
 
 # Plain names for download filenames, without the emoji.
@@ -78,6 +95,9 @@ MODE_FILENAMES = {
     SPIRAL: "螺旋",
     TILE: "镜面平铺",
     PAPERCUT: "窗花",
+    GLITCH: "故障",
+    SPECTRUM: "频谱",
+    SCRAMBLE: "相位打乱",
 }
 
 # The kaleidoscope mirrors each wedge, so two wedges make one cell and the
@@ -89,15 +109,21 @@ COUNTS_BY_MODE = {
     SPIRAL: (2, 3, 4, 5, 6, 8, 12),
     TILE: (2, 3, 4, 6),
     PAPERCUT: (2, 3, 4, 6),
+    GLITCH: (1, 2, 3, 4, 5),
+    SPECTRUM: (1, 2, 3, 4, 5),
+    SCRAMBLE: (1, 2, 3, 4, 5),
 }
-DEFAULT_COUNT_BY_MODE = {KALEIDO: 8, PINWHEEL: 8, SPIRAL: 6, TILE: 3, PAPERCUT: 3}
+DEFAULT_COUNT_BY_MODE = {KALEIDO: 8, PINWHEEL: 8, SPIRAL: 6, TILE: 3, PAPERCUT: 3,
+                         GLITCH: 3, SPECTRUM: 2, SCRAMBLE: 3}
 # The grid modes count cells per side rather than segments around a centre, so
 # their selector is labelled differently and their readouts spell out the whole
 # n x n grid instead of a bare number.
 COUNT_LABELS = {KALEIDO: "瓣数", PINWHEEL: "叶数", SPIRAL: "臂数",
-                TILE: "格数", PAPERCUT: "格数"}
+                TILE: "格数", PAPERCUT: "格数",
+                GLITCH: "强度", SPECTRUM: "对比", SCRAMBLE: "强度"}
 COUNT_UNITS = {KALEIDO: "瓣", PINWHEEL: "叶", SPIRAL: "臂",
-               TILE: "格", PAPERCUT: "格"}
+               TILE: "格", PAPERCUT: "格",
+               GLITCH: "级", SPECTRUM: "级", SCRAMBLE: "级"}
 
 # Total twist in degrees, strongest at the centre and fading to nothing at the
 # rim so the frame edges stay put.
@@ -127,7 +153,10 @@ FORMAT_EXT = {"JPEG": "jpg", "PNG": "png", "GIF": "gif", "WEBP": "webp"}
 MAX_PIXELS = 50_000_000  # decompression-bomb guard, roughly 7000x7000
 
 _PLAIN_RE = re.compile(r"\A(l2r|r2l|t2b|b2t|d1|d2|quad)\Z")
-_COUNT_RE = re.compile(r"\A(kaleido|pinwheel|tile|papercut)_(\d{1,2})_(\d{1,3})\Z")
+_COUNT_RE = re.compile(
+    r"\A(kaleido|pinwheel|tile|papercut|glitch|spectrum|scramble)"
+    r"_(\d{1,2})_(\d{1,3})\Z"
+)
 # The spiral carries a fourth field for its twist.
 _SPIRAL_RE = re.compile(r"\A(spiral)_(\d{1,2})_(\d{1,3})_(\d{1,3})\Z")
 
@@ -625,10 +654,144 @@ def _spiral_frame(
     return _twist_frame(base, twist)
 
 
+# --------------------------------------------------------------------------
+# Glitch and frequency-domain transforms
+#
+# These are distortions rather than symmetries, but they compose well with the
+# symmetric modes -- feeding a glitched frame into the kaleidoscope is the
+# point. The seeded ones derive their seed from the parameters plus the frame
+# index, so a variant always renders identically (the cache depends on it)
+# while animations still get per-frame variation.
+# --------------------------------------------------------------------------
+
+def _seed_for(mode: str, level: int, index: int) -> int:
+    """A stable seed. Never use hash() here -- it is salted per process."""
+    return zlib.crc32(f"{mode}:{level}:{index}".encode())
+
+
+def _numpy():
+    """Import numpy on demand so the rest of the app runs without it."""
+    try:
+        import numpy
+    except ImportError:
+        raise MirrorError(
+            "频谱和相位打乱需要 numpy，请重新运行 run.bat 装一下依赖"
+        ) from None
+    return numpy
+
+
+def _slide(channel: Image.Image, dx: int) -> Image.Image:
+    """Shift one channel sideways, wrapping so no blank edge appears."""
+    width = channel.width
+    moved = Image.new("L", channel.size, 0)
+    for k in (-1, 0, 1):
+        moved.paste(channel, (dx + k * width, 0))
+    return moved
+
+
+def _glitch_frame(frame: Image.Image, level: int, index: int = 0) -> Image.Image:
+    """Scanline tears plus channel misregistration. Pillow only, no numpy."""
+    check_count(GLITCH, level)
+    rng = random.Random(_seed_for(GLITCH, level, index))
+    width, height = frame.size
+    out = frame.copy()
+
+    # Slice out horizontal bands and roll them sideways. The roll wraps, so
+    # the frame keeps its full width instead of gaining blank margins.
+    for _ in range(level * 4):
+        band_h = rng.randint(2, max(3, height // 24))
+        y = rng.randrange(0, max(1, height - band_h))
+        band = out.crop((0, y, width, y + band_h))
+        dx = rng.randint(1, max(2, width * level // 30)) * rng.choice((-1, 1))
+        rolled = Image.new("RGBA", band.size, (0, 0, 0, 0))
+        for k in (-1, 0, 1):
+            rolled.paste(band, (dx + k * width, 0))
+        out.paste(rolled, (0, y))
+
+    # Pull the red and blue channels apart; alpha stays put so the silhouette
+    # doesn't fringe.
+    shift = max(1, level * width // 200)
+    red, green, blue, alpha = out.split()
+    out = Image.merge("RGBA", (_slide(red, -shift), green, _slide(blue, shift), alpha))
+
+    # A few opaque tear bars for the "corrupted tape" read
+    draw = ImageDraw.Draw(out)
+    for _ in range(level):
+        y = rng.randrange(height)
+        bar_h = rng.randint(1, max(2, height // 70))
+        tone = rng.choice(((255, 255, 255, 255), (14, 14, 20, 255), (255, 70, 130, 255)))
+        draw.rectangle([0, y, width, y + bar_h], fill=tone)
+    return out
+
+
+def _spectrum_frame(frame: Image.Image, level: int) -> Image.Image:
+    """Log magnitude spectrum of the frame, DC shifted to the centre.
+
+    For a real-valued image F(-u,-v) is the conjugate of F(u,v), so the
+    magnitude is centrosymmetric: the spectrum is the most symmetric thing you
+    can derive from an arbitrary photo. Be warned that ordinary photos all
+    produce much the same faint cross; only strongly periodic sources give a
+    spectrum with visible structure.
+    """
+    check_count(SPECTRUM, level)
+    np = _numpy()
+
+    # higher level = harder gamma = darker background, brighter peaks
+    gamma = {1: 0.6, 2: 1.0, 3: 1.6, 4: 2.4, 5: 3.2}[level]
+    grey = np.asarray(frame.convert("L"), dtype=float)
+    shifted = np.fft.fftshift(np.fft.fft2(grey))
+    mag = np.log1p(np.abs(shifted))
+    span = float(mag.max() - mag.min())
+    mag = (mag - mag.min()) / (span if span else 1.0)
+    mag = mag ** gamma
+
+    out = Image.fromarray((mag * 255).astype("uint8"), "L").convert("RGBA")
+    return out
+
+
+def _scramble_frame(frame: Image.Image, level: int, index: int = 0) -> Image.Image:
+    """Keep each channel's magnitude spectrum, randomise its phase.
+
+    Magnitude carries how much of each spatial frequency is present; phase
+    carries where it sits. Randomising phase therefore preserves the image's
+    overall texture statistics while destroying its layout -- structured noise
+    that still "feels like" the original.
+    """
+    check_count(SCRAMBLE, level)
+    np = _numpy()
+
+    amount = {1: 0.15, 2: 0.3, 3: 0.5, 4: 0.75, 5: 1.0}[level]
+    rng = np.random.default_rng(_seed_for(SCRAMBLE, level, index))
+
+    channels = []
+    for channel in frame.convert("RGB").split():
+        spec = np.fft.fft2(np.asarray(channel, dtype=float))
+        jitter = rng.uniform(-math.pi, math.pi, spec.shape)
+        phase = np.angle(spec) + amount * jitter
+        rebuilt = np.real(np.fft.ifft2(np.abs(spec) * np.exp(1j * phase)))
+        channels.append(
+            Image.fromarray(np.clip(rebuilt, 0, 255).astype("uint8"), "L")
+        )
+
+    out = Image.merge("RGB", channels).convert("RGBA")
+    out.putalpha(frame.getchannel("A"))
+    return out
+
+
 def _transform(
     frame: Image.Image, mode: str, count: int | None, offset: int | None,
-    twist: int | None = None,
+    twist: int | None = None, index: int = 0,
 ) -> Image.Image:
+    if mode == GLITCH:
+        return _glitch_frame(frame, default_count(GLITCH) if count is None else count,
+                             index)
+    if mode == SPECTRUM:
+        return _spectrum_frame(frame,
+                               default_count(SPECTRUM) if count is None else count)
+    if mode == SCRAMBLE:
+        return _scramble_frame(frame,
+                               default_count(SCRAMBLE) if count is None else count,
+                               index)
     if mode == SPIRAL:
         return _spiral_frame(
             frame,
@@ -658,10 +821,15 @@ def _transform(
 # File-level entry points
 # --------------------------------------------------------------------------
 
-def _apply_steps(frame: Image.Image, steps: list[Step]) -> Image.Image:
-    """Run a whole chain over one frame, in order."""
+def _apply_steps(frame: Image.Image, steps: list[Step], index: int = 0) -> Image.Image:
+    """Run a whole chain over one frame, in order.
+
+    `index` is the frame number, passed on so the seeded modes vary across an
+    animation while staying reproducible for any given frame.
+    """
     for step in steps:
-        frame = _transform(frame, step.mode, step.count, step.offset, step.twist)
+        frame = _transform(frame, step.mode, step.count, step.offset, step.twist,
+                           index)
     return frame
 
 
@@ -690,7 +858,7 @@ def _flip_animated(src: Path, dst: Path, steps: list[Step]) -> None:
         loop = im.info.get("loop", 0)
         for frame in ImageSequence.Iterator(im):
             # convert() composites the current frame per the GIF disposal rules
-            frames.append(_apply_steps(frame.convert("RGBA"), steps))
+            frames.append(_apply_steps(frame.convert("RGBA"), steps, len(frames)))
             durations.append(frame.info.get("duration", default_duration))
 
     if not frames:
@@ -718,9 +886,19 @@ def flip_chain(src: Path, dst: Path, steps: list[Step], animated: bool) -> None:
         raise MirrorError("至少要选一个效果")
     if len(steps) > MAX_STEPS:
         raise MirrorError(f"最多叠加 {MAX_STEPS} 个效果")
+    # Validate here rather than only inside the individual frame functions, so
+    # a direct library call rejects a parameter the mode doesn't take instead
+    # of silently dropping it. Falsy values mean "not supplied" -- 0 is the
+    # valid default for both offset and twist.
     for step in steps:
         if step.mode not in MODES:
             raise MirrorError(f"未知的处理方式：{step.mode}")
+        if step.count is not None:
+            check_count(step.mode, step.count)
+        if step.offset:
+            check_offset(step.mode, step.offset)
+        if step.twist:
+            check_twist(step.mode, step.twist)
 
     src, dst = Path(src), Path(dst)
     dst.parent.mkdir(parents=True, exist_ok=True)

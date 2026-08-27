@@ -37,7 +37,7 @@ if errorlevel 1 goto fail_venv
 goto install
 
 :check_deps
-"%VPY%" -c "import flask, PIL" >nul 2>nul
+"%VPY%" -c "import flask, PIL, numpy" >nul 2>nul
 if errorlevel 1 goto install
 goto run
 
