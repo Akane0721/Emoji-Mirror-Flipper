@@ -80,12 +80,8 @@
     button:disabled { opacity: .5; cursor: default; }
     button.ghost { border-style: dashed; }
 
-    /* Advanced row */
+    /* Kaleidoscope row */
     .advanced { margin-top: -6px; }
-    .tag {
-        font-size: .72rem; letter-spacing: .08em; text-transform: uppercase;
-        color: var(--muted); padding-right: 2px;
-    }
     .seg { display: inline-flex; align-items: center; gap: 6px; font-size: .85rem; color: var(--muted); }
     .seg select {
         font: inherit;
@@ -97,6 +93,12 @@
         cursor: pointer;
     }
     .seg select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+    .seg input[type="range"] { width: 110px; accent-color: var(--accent); cursor: pointer; }
+    .seg output {
+        min-width: 3.2em; text-align: right;
+        font-variant-numeric: tabular-nums; color: var(--text);
+    }
+    .seg.dim { opacity: .45; }
 
     .panes { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
     @media (max-width: 620px) { .panes { grid-template-columns: 1fr; } }
@@ -162,22 +164,25 @@
 
     <div id="work">
         <div class="bar">
-            {% for key, label in directions %}
+            {% for key, label in plain_modes %}
             <button class="mode" data-mode="{{ key }}">{{ label }}</button>
             {% endfor %}
             <span id="spin">处理中…</span>
         </div>
 
         <div class="bar advanced">
-            <span class="tag">高级</span>
-            <button class="mode" data-mode="{{ kaleido_mode }}">🔮 {{ kaleido_label }}</button>
+            {% for key, label in radial_modes %}
+            <button class="mode" data-mode="{{ key }}">{{ label }}</button>
+            {% endfor %}
             <label class="seg">
                 瓣数
-                <select id="segments">
-                    {% for n in kaleido_segments %}
-                    <option value="{{ n }}"{% if n == default_segments %} selected{% endif %}>{{ n }}</option>
-                    {% endfor %}
-                </select>
+                <select id="segments"></select>
+            </label>
+            <label class="seg">
+                起始角
+                <input type="range" id="offset" min="0" max="{{ 360 - offset_step }}"
+                       step="{{ offset_step }}" value="{{ default_offset }}">
+                <output id="offsetOut">{{ default_offset }}°</output>
             </label>
         </div>
 
@@ -202,17 +207,47 @@
 </div>
 
 <script>
-const KALEIDO = {{ kaleido_mode | tojson }};
+const SEGMENTS_BY_MODE = {{ segments_by_mode | tojson }};
+const DEFAULT_SEGMENTS = {{ default_segments | tojson }};
 
 const $ = (id) => document.getElementById(id);
 const drop = $('drop'), fileInput = $('file'), work = $('work'), err = $('err');
 const srcImg = $('src'), outImg = $('out'), srcMeta = $('srcMeta'), outMeta = $('outMeta');
-const dlLink = $('dl'), spin = $('spin'), segSelect = $('segments');
+const dlLink = $('dl'), spin = $('spin');
+const segSelect = $('segments'), offsetInput = $('offset'), offsetOut = $('offsetOut');
 const modeButtons = [...document.querySelectorAll('.mode')];
 
+const isRadial = (mode) => Object.prototype.hasOwnProperty.call(SEGMENTS_BY_MODE, mode);
+
 let current = null;    // the current upload: {id, animated, ...}
-let activeMode = null; // so changing the segment count can re-render in place
+let activeMode = null; // so changing segments/offset can re-render in place
 let busy = false;
+
+// The kaleidoscope needs an even segment count; the pinwheel doesn't, so it
+// offers 3 and 5 as well. Rebuild the options per mode, keeping the current
+// value when it's still valid.
+function syncSegmentOptions(mode) {
+    const allowed = SEGMENTS_BY_MODE[mode] || [];
+    const wanted = Number(segSelect.value) || DEFAULT_SEGMENTS;
+    const keep = allowed.includes(wanted) ? wanted : DEFAULT_SEGMENTS;
+    segSelect.innerHTML = '';
+    for (const n of allowed) {
+        const opt = document.createElement('option');
+        opt.value = String(n);
+        opt.textContent = String(n);
+        if (n === keep) opt.selected = true;
+        segSelect.append(opt);
+    }
+}
+
+function syncControls(mode) {
+    const on = isRadial(mode);
+    document.querySelectorAll('.seg').forEach(el => el.classList.toggle('dim', !on));
+    if (on) syncSegmentOptions(mode);
+}
+
+syncSegmentOptions('{{ radial_modes[0][0] }}');
+syncControls(null);
 
 function showError(msg) {
     err.textContent = msg;
@@ -226,6 +261,7 @@ function setBusy(state) {
     spin.classList.toggle('show', state);
     modeButtons.forEach(b => b.disabled = state);
     segSelect.disabled = state;
+    offsetInput.disabled = state;
 }
 
 async function upload(file) {
@@ -249,6 +285,7 @@ async function upload(file) {
         outMeta.textContent = '选一个效果';
         dlLink.classList.add('off');
         activeMode = null;
+        syncControls(null);
         modeButtons.forEach(b => b.classList.remove('on'));
         work.style.display = 'block';
     } catch (e) {
@@ -264,9 +301,13 @@ async function doFlip(mode, button) {
     setBusy(true);
     activeMode = mode;
     modeButtons.forEach(b => b.classList.toggle('on', b === button));
+    syncControls(mode);
 
     const payload = { id: current.id, mode };
-    if (mode === KALEIDO) payload.segments = Number(segSelect.value);
+    if (isRadial(mode)) {
+        payload.segments = Number(segSelect.value);
+        payload.offset = Number(offsetInput.value);
+    }
 
     try {
         const res = await fetch('/api/flip', {
@@ -279,8 +320,9 @@ async function doFlip(mode, button) {
 
         outImg.src = data.url;
         outImg.style.display = 'block';
-        // Kaleidoscope crops to a centred square, so the size can change
+        // Radial modes crop to a centred square, so the size can change
         let label = button.textContent.trim();
+        if (isRadial(mode)) label += ` ${payload.segments} 瓣 · ${payload.offset}°`;
         if (data.width && data.height) label += ` · ${data.width}×${data.height}`;
         outMeta.textContent = label;
         dlLink.href = data.download_url;
@@ -314,17 +356,25 @@ document.addEventListener('paste', e => {
 
 modeButtons.forEach(b => b.addEventListener('click', () => doFlip(b.dataset.mode, b)));
 
-// Changing the segment count re-renders immediately, but only when the
-// kaleidoscope is what's currently on screen.
-segSelect.addEventListener('change', () => {
-    if (activeMode !== KALEIDO) return;
-    const button = modeButtons.find(b => b.dataset.mode === KALEIDO);
-    doFlip(KALEIDO, button);
+// Changing a parameter re-renders in place, but only when a radial mode is
+// what's currently on screen.
+function rerenderRadial() {
+    if (!isRadial(activeMode)) return;
+    doFlip(activeMode, modeButtons.find(b => b.dataset.mode === activeMode));
+}
+segSelect.addEventListener('change', rerenderRadial);
+
+// 'input' fires continuously while dragging, so only track the readout there
+// and wait for 'change' (pointer release) before hitting the server.
+offsetInput.addEventListener('input', () => {
+    offsetOut.textContent = offsetInput.value + '°';
 });
+offsetInput.addEventListener('change', rerenderRadial);
 
 $('reset').addEventListener('click', () => {
     current = null;
     activeMode = null;
+    syncControls(null);
     work.style.display = 'none';
     clearError();
     window.scrollTo({ top: 0, behavior: 'smooth' });

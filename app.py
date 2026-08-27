@@ -14,9 +14,21 @@ from threading import Timer
 from flask import Flask, abort, jsonify, render_template, request, send_file
 from PIL import Image
 
-from mirror import (DEFAULT_SEGMENTS, DIRECTION_LABELS, DIRECTIONS, KALEIDO,
-                    KALEIDO_LABEL, KALEIDO_SEGMENTS, MODES, MirrorError, flip,
-                    parse_variant, probe, variant_key)
+from mirror import (DEFAULT_OFFSET, DEFAULT_SEGMENTS, DIRECTIONS, KALEIDO,
+                    MODE_LABELS, MODES, OFFSET_STEP, PINWHEEL, QUAD,
+                    RADIAL_MODES, SEGMENTS_BY_MODE, MirrorError, check_offset,
+                    check_segments, flip, parse_variant, probe, variant_key)
+
+# Plain names for download filenames; MODE_LABELS carries emoji for the UI.
+DOWNLOAD_NAMES = {
+    "l2r": "左右对称",
+    "r2l": "右左对称",
+    "t2b": "上下对称",
+    "b2t": "下上对称",
+    QUAD: "四象限",
+    KALEIDO: "万花筒",
+    PINWHEEL: "风车",
+}
 
 BASE_DIR = Path(__file__).resolve().parent
 UPLOAD_DIR = BASE_DIR / "uploads"
@@ -83,11 +95,14 @@ def _source_path(file_id: str) -> Path:
 
 def _page_context() -> dict:
     return {
-        "directions": [(key, DIRECTION_LABELS[key]) for key in DIRECTIONS],
-        "kaleido_mode": KALEIDO,
-        "kaleido_label": KALEIDO_LABEL,
-        "kaleido_segments": list(KALEIDO_SEGMENTS),
+        # First row: everything that keeps the source's aspect ratio.
+        "plain_modes": [(key, MODE_LABELS[key]) for key in DIRECTIONS + (QUAD,)],
+        # Second row: the radial modes, which share the segment and angle controls.
+        "radial_modes": [(key, MODE_LABELS[key]) for key in RADIAL_MODES],
+        "segments_by_mode": {m: list(s) for m, s in SEGMENTS_BY_MODE.items()},
         "default_segments": DEFAULT_SEGMENTS,
+        "offset_step": OFFSET_STEP,
+        "default_offset": DEFAULT_OFFSET,
         "max_mb": MAX_UPLOAD_BYTES // (1024 * 1024),
     }
 
@@ -149,18 +164,18 @@ def api_flip():
     if mode not in MODES:
         return jsonify(ok=False, error="处理方式不对"), 400
 
-    segments = None
-    if mode == KALEIDO:
-        raw = payload.get("segments", DEFAULT_SEGMENTS)
+    segments = offset = None
+    if mode in RADIAL_MODES:
         try:
-            segments = int(raw)
+            segments = int(payload.get("segments", DEFAULT_SEGMENTS))
+            offset = int(payload.get("offset", DEFAULT_OFFSET))
         except (TypeError, ValueError):
-            return jsonify(ok=False, error="瓣数得是个数字"), 400
-        if segments not in KALEIDO_SEGMENTS:
-            return jsonify(
-                ok=False,
-                error=f"万花筒瓣数只能是 {', '.join(map(str, KALEIDO_SEGMENTS))}",
-            ), 400
+            return jsonify(ok=False, error="瓣数和起始角得是数字"), 400
+        try:
+            check_segments(mode, segments)
+            check_offset(offset)
+        except MirrorError as exc:
+            return jsonify(ok=False, error=str(exc)), 400
 
     src = _source_path(file_id)
     try:
@@ -168,13 +183,13 @@ def api_flip():
     except MirrorError as exc:
         return jsonify(ok=False, error=str(exc)), 400
 
-    variant = variant_key(mode, segments)
+    variant = variant_key(mode, segments, offset)
     OUTPUT_DIR.mkdir(exist_ok=True)
     dst = OUTPUT_DIR / f"{file_id}_{variant}.{info.ext}"
 
     if not dst.exists():
         try:
-            flip(src, dst, mode, info.animated, segments=segments)
+            flip(src, dst, mode, info.animated, segments=segments, offset=offset)
         except MirrorError as exc:
             return jsonify(ok=False, error=str(exc)), 400
 
@@ -201,32 +216,31 @@ def media_src(file_id: str):
     return send_file(_source_path(file_id))
 
 
-def _output_path(file_id: str, variant: str) -> tuple[Path, str, int | None]:
+def _output_path(file_id: str, variant: str) -> tuple[Path, str, int | None, int | None]:
     """Resolve a rendered output, rejecting anything we didn't produce."""
     try:
-        mode, segments = parse_variant(variant)
+        mode, segments, offset = parse_variant(variant)
     except MirrorError:
         abort(404)
     path = _find(OUTPUT_DIR, f"{_check_id(file_id)}_{variant}")
     if path is None:
         abort(404)
-    return path, mode, segments
+    return path, mode, segments, offset
 
 
 @app.get("/media/out/<file_id>/<variant>")
 def media_out(file_id: str, variant: str):
-    path, _mode, _segments = _output_path(file_id, variant)
+    path, _mode, _segments, _offset = _output_path(file_id, variant)
     return send_file(path)
 
 
 @app.get("/download/<file_id>/<variant>")
 def download(file_id: str, variant: str):
-    path, mode, segments = _output_path(file_id, variant)
-    if mode == KALEIDO:
-        name = f"{KALEIDO_LABEL}{segments}瓣{path.suffix}"
-    else:
-        name = f"对称_{DIRECTION_LABELS[mode]}{path.suffix}"
-    return send_file(path, as_attachment=True, download_name=name)
+    path, mode, segments, offset = _output_path(file_id, variant)
+    name = DOWNLOAD_NAMES[mode]
+    if mode in RADIAL_MODES:
+        name = f"{name}{segments}瓣{offset}度"
+    return send_file(path, as_attachment=True, download_name=f"{name}{path.suffix}")
 
 
 # --------------------------------------------------------------------------
