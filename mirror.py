@@ -9,7 +9,8 @@ import zlib
 from dataclasses import dataclass
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageSequence, UnidentifiedImageError
+from PIL import (Image, ImageDraw, ImageFilter, ImageSequence,
+                 UnidentifiedImageError)
 
 # --------------------------------------------------------------------------
 # Modes
@@ -32,15 +33,22 @@ ROW_SHIFT = "rowshift"
 CHANNEL_SHIFT = "chshift"
 FOURIER = "fourier"
 PHASE_RANDOM = "phaserand"
+WAVELET = "wavelet"
+DCT = "dct"
+RADON = "radon"
+HOUGH = "hough"
+POLAR = "polar"
+LOGPOLAR = "logpolar"
 
 # Modes assembled from angular wedges around the centre.
 RADIAL_MODES = (KALEIDO, PINWHEEL, SPIRAL)
 # Modes whose count means "cells per side" rather than "segments".
 GRID_MODES = (TILE, PAPERCUT)
 # Modes whose count is a plain 1-5 intensity dial.
-LEVEL_MODES = (ROW_SHIFT, CHANNEL_SHIFT, FOURIER, PHASE_RANDOM)
+LEVEL_MODES = (ROW_SHIFT, CHANNEL_SHIFT, FOURIER, PHASE_RANDOM, WAVELET, DCT,
+               RADON, HOUGH, POLAR, LOGPOLAR)
 # Modes that need numpy; imported lazily so the rest keeps working without it.
-FOURIER_MODES = (FOURIER, PHASE_RANDOM)
+NUMPY_MODES = (FOURIER, PHASE_RANDOM, WAVELET, DCT, RADON, HOUGH)
 # Modes that use a pseudo-random seed. It is derived from the parameters and
 # the frame index so a given variant always renders identically -- the output
 # cache is keyed on the variant, so non-determinism would be a real bug.
@@ -81,6 +89,12 @@ MODE_LABELS = {
     CHANNEL_SHIFT: "🌈 红蓝通道平移",
     FOURIER: "📊 傅里叶变换",
     PHASE_RANDOM: "🎞️ 相位随机化",
+    WAVELET: "📉 小波变换",
+    DCT: "📐 离散余弦变换",
+    RADON: "🩻 拉东变换",
+    HOUGH: "📡 霍夫变换",
+    POLAR: "🎯 极坐标变换",
+    LOGPOLAR: "🌀 对数极坐标",
 }
 
 # Plain names for download filenames, without the emoji.
@@ -101,6 +115,12 @@ MODE_FILENAMES = {
     CHANNEL_SHIFT: "红蓝通道平移",
     FOURIER: "傅里叶变换",
     PHASE_RANDOM: "相位随机化",
+    WAVELET: "小波变换",
+    DCT: "离散余弦变换",
+    RADON: "拉东变换",
+    HOUGH: "霍夫变换",
+    POLAR: "极坐标变换",
+    LOGPOLAR: "对数极坐标",
 }
 
 # The kaleidoscope mirrors each wedge, so two wedges make one cell and the
@@ -116,21 +136,32 @@ COUNTS_BY_MODE = {
     CHANNEL_SHIFT: (1, 2, 3, 4, 5),
     FOURIER: (1, 2, 3, 4, 5),
     PHASE_RANDOM: (1, 2, 3, 4, 5),
+    WAVELET: (1, 2, 3, 4, 5),
+    DCT: (1, 2, 3, 4, 5),
+    RADON: (1, 2, 3, 4, 5),
+    HOUGH: (1, 2, 3, 4, 5),
+    POLAR: (1, 2, 3, 4, 6),
+    LOGPOLAR: (1, 2, 3, 4, 6),
 }
 DEFAULT_COUNT_BY_MODE = {KALEIDO: 8, PINWHEEL: 8, SPIRAL: 6, TILE: 3, PAPERCUT: 3,
                          ROW_SHIFT: 3, CHANNEL_SHIFT: 3, FOURIER: 2,
-                         PHASE_RANDOM: 3}
+                         PHASE_RANDOM: 3, WAVELET: 3, DCT: 3, RADON: 3,
+                         HOUGH: 3, POLAR: 1, LOGPOLAR: 1}
 # The grid modes count cells per side rather than segments around a centre, so
 # their selector is labelled differently and their readouts spell out the whole
 # n x n grid instead of a bare number.
 COUNT_LABELS = {KALEIDO: "瓣数", PINWHEEL: "叶数", SPIRAL: "臂数",
                 TILE: "格数", PAPERCUT: "格数",
                 ROW_SHIFT: "强度", CHANNEL_SHIFT: "强度",
-                FOURIER: "对比", PHASE_RANDOM: "强度"}
+                FOURIER: "对比", PHASE_RANDOM: "强度",
+                WAVELET: "层数", DCT: "对比", RADON: "角度", HOUGH: "精度",
+                POLAR: "圈数", LOGPOLAR: "圈数"}
 COUNT_UNITS = {KALEIDO: "瓣", PINWHEEL: "叶", SPIRAL: "臂",
                TILE: "格", PAPERCUT: "格",
                ROW_SHIFT: "级", CHANNEL_SHIFT: "级",
-               FOURIER: "级", PHASE_RANDOM: "级"}
+               FOURIER: "级", PHASE_RANDOM: "级",
+               WAVELET: "层", DCT: "级", RADON: "级", HOUGH: "级",
+               POLAR: "圈", LOGPOLAR: "圈"}
 
 # Total twist in degrees, strongest at the centre and fading to nothing at the
 # rim so the frame edges stay put.
@@ -161,7 +192,8 @@ MAX_PIXELS = 50_000_000  # decompression-bomb guard, roughly 7000x7000
 
 _PLAIN_RE = re.compile(r"\A(l2r|r2l|t2b|b2t|d1|d2|quad)\Z")
 _COUNT_RE = re.compile(
-    r"\A(kaleido|pinwheel|tile|papercut|rowshift|chshift|fourier|phaserand)"
+    r"\A(kaleido|pinwheel|tile|papercut|rowshift|chshift|fourier|phaserand"
+    r"|wavelet|dct|radon|hough|polar|logpolar)"
     r"_(\d{1,2})_(\d{1,3})\Z"
 )
 # The spiral carries a fourth field for its twist.
@@ -593,6 +625,33 @@ def _radial_frame(
     return out.crop((inset, inset, inset + size, inset + size))
 
 
+def _mesh_warp(frame: Image.Image, source, cells: int = 56) -> Image.Image:
+    """Remap a frame through a cells x cells MESH grid.
+
+    `source(x, y)` returns where an output point should be sampled from.
+    Pillow interpolates inside each quad in C, so a coarse grid is enough and
+    there is no per-pixel Python loop.
+    """
+    width, height = frame.size
+    mesh = []
+    for row in range(cells):
+        y0, y1 = height * row / cells, height * (row + 1) / cells
+        for col in range(cells):
+            x0, x1 = width * col / cells, width * (col + 1) / cells
+            box = (int(x0), int(y0), math.ceil(x1), math.ceil(y1))
+            # Pillow wants the source quad as upper-left, lower-left,
+            # lower-right, upper-right.
+            quad = [
+                c
+                for point in (source(x0, y0), source(x0, y1),
+                              source(x1, y1), source(x1, y0))
+                for c in point
+            ]
+            mesh.append((box, quad))
+    return frame.transform((width, height), Image.MESH, mesh,
+                           resample=Image.BICUBIC)
+
+
 def _twist_frame(frame: Image.Image, degrees: int, cells: int = 56) -> Image.Image:
     """Rotate each pixel about the centre by an amount that depends on radius.
 
@@ -631,25 +690,7 @@ def _twist_frame(frame: Image.Image, degrees: int, cells: int = 56) -> Image.Ima
         angle = math.atan2(dy, dx) + strength * (1 - math.log1p(radius) / falloff)
         return cx + radius * math.cos(angle), cy + radius * math.sin(angle)
 
-    mesh = []
-    for row in range(cells):
-        y0, y1 = height * row / cells, height * (row + 1) / cells
-        for col in range(cells):
-            x0, x1 = width * col / cells, width * (col + 1) / cells
-            box = (int(x0), int(y0), math.ceil(x1), math.ceil(y1))
-            # Pillow wants the source quad as upper-left, lower-left,
-            # lower-right, upper-right.
-            quad = [
-                c
-                for point in (source(x0, y0), source(x0, y1),
-                              source(x1, y1), source(x1, y0))
-                for c in point
-            ]
-            mesh.append((box, quad))
-
-    return frame.transform(
-        (width, height), Image.MESH, mesh, resample=Image.BICUBIC
-    )
+    return _mesh_warp(frame, source, cells)
 
 
 def _spiral_frame(
@@ -682,7 +723,7 @@ def _numpy():
         import numpy
     except ImportError:
         raise MirrorError(
-            "傅里叶变换和相位随机化需要 numpy，请重新运行 run.bat 装一下依赖"
+            "这个变换需要 numpy，请重新运行 run.bat 装一下依赖"
         ) from None
     return numpy
 
@@ -794,10 +835,189 @@ def _phase_random_frame(
     return out
 
 
+# --------------------------------------------------------------------------
+# Named transforms
+#
+# Each of these is a textbook transform rendered as a picture. They are not
+# symmetries and mostly aren't even reversible here -- the point is that they
+# look strange, and that they feed the symmetric modes interesting input.
+# --------------------------------------------------------------------------
+
+def _grey_array(np, frame: Image.Image):
+    return np.asarray(frame.convert("L"), dtype=float)
+
+
+def _from_array(np, data, size: tuple[int, int]) -> Image.Image:
+    out = Image.fromarray(np.clip(data, 0, 255).astype("uint8"), "L").convert("RGBA")
+    return out if out.size == size else out.resize(size, Image.LANCZOS)
+
+
+def _normalise(np, data, gamma: float, percentile: float | None = None):
+    """Scale a coefficient field into 0..255.
+
+    Plain min-max is fine for the Fourier magnitude but useless for DCT-like
+    transforms, where the DC term is orders of magnitude above everything else
+    and flattens the rest to black. Clipping at a high percentile instead keeps
+    the interesting structure visible.
+    """
+    mag = np.log1p(np.abs(data))
+    if percentile is None:
+        span = float(mag.max() - mag.min())
+        mag = (mag - mag.min()) / (span if span else 1.0)
+    else:
+        hi = float(np.percentile(mag, percentile))
+        mag = np.clip(mag / (hi if hi else 1.0), 0, 1)
+    return mag ** gamma * 255
+
+
+_CONTRAST_GAMMA = {1: 0.5, 2: 0.8, 3: 1.2, 4: 1.8, 5: 2.6}
+
+
+def _wavelet_frame(frame: Image.Image, levels: int) -> Image.Image:
+    """Haar wavelet decomposition -- the nested sub-band picture.
+
+    Each pass replaces a quadrant with (average, difference) pairs, so the
+    top-left keeps shrinking into a thumbnail while the rest fills with edge
+    detail. Detail coefficients sit near zero, so they get lifted to mid grey
+    to be visible at all.
+    """
+    check_count(WAVELET, levels)
+    np = _numpy()
+
+    # every pass halves the working area, so the side has to divide evenly
+    side = 1 << levels
+    width = max(side, (frame.width // side) * side)
+    height = max(side, (frame.height // side) * side)
+    data = _grey_array(np, frame.resize((width, height), Image.LANCZOS))
+
+    for level in range(levels):
+        rows, cols = height >> level, width >> level
+        block = data[:rows, :cols]
+        lo = (block[:, 0::2] + block[:, 1::2]) / 2
+        hi = (block[:, 0::2] - block[:, 1::2]) / 2
+        data[:rows, :cols // 2], data[:rows, cols // 2:cols] = lo, hi
+        block = data[:rows, :cols]
+        lo = (block[0::2, :] + block[1::2, :]) / 2
+        hi = (block[0::2, :] - block[1::2, :]) / 2
+        data[:rows // 2, :cols], data[rows // 2:rows, :cols] = lo, hi
+
+    display = 128 + data * 6
+    keep_h, keep_w = height >> levels, width >> levels
+    display[:keep_h, :keep_w] = data[:keep_h, :keep_w]
+    return _from_array(np, display, frame.size)
+
+
+def _dct_frame(frame: Image.Image, level: int) -> Image.Image:
+    """Discrete cosine transform -- the basis JPEG is built on.
+
+    Energy piles into the top-left corner instead of the centre, which is what
+    makes it look different from the Fourier spectrum.
+    """
+    check_count(DCT, level)
+    np = _numpy()
+
+    def basis(n):
+        k = np.arange(n)[:, None]
+        x = np.arange(n)[None, :]
+        m = np.cos(np.pi * (2 * x + 1) * k / (2 * n)) * math.sqrt(2 / n)
+        m[0] /= math.sqrt(2)
+        return m
+
+    grey = _grey_array(np, frame)
+    coef = basis(grey.shape[0]) @ grey @ basis(grey.shape[1]).T
+    return _from_array(np, _normalise(np, coef, _CONTRAST_GAMMA[level], 99.0),
+                       frame.size)
+
+
+def _radon_frame(frame: Image.Image, level: int) -> Image.Image:
+    """Radon transform -- the sinogram a CT scanner actually measures.
+
+    Sum the image along every direction; each row of the output is one
+    projection. Runs on a downscaled copy because the sinogram carries far
+    less detail than the source and the rotations dominate the cost.
+    """
+    check_count(RADON, level)
+    np = _numpy()
+
+    steps = {1: 60, 2: 120, 3: 180, 4: 270, 5: 360}[level]
+    work = frame.convert("L")
+    if max(work.size) > 256:
+        work.thumbnail((256, 256), Image.LANCZOS)
+
+    # rotate inside a square big enough that nothing leaves the frame
+    side = int(math.hypot(*work.size)) + 2
+    canvas = Image.new("L", (side, side), 0)
+    canvas.paste(work, ((side - work.width) // 2, (side - work.height) // 2))
+
+    sino = np.array([
+        np.asarray(canvas.rotate(180 * i / steps, resample=Image.BILINEAR),
+                   dtype=float).sum(axis=0)
+        for i in range(steps)
+    ])
+    return _from_array(np, _normalise(np, sino, 1.0), frame.size)
+
+
+def _hough_frame(frame: Image.Image, level: int) -> Image.Image:
+    """Hough transform -- every edge pixel votes for the lines through it.
+
+    The output is the (rho, theta) accumulator, where a straight edge in the
+    source shows up as a bright point and a point shows up as a sinusoid.
+    """
+    check_count(HOUGH, level)
+    np = _numpy()
+
+    thetas_n = {1: 120, 2: 180, 3: 240, 4: 320, 5: 400}[level]
+    edges = _grey_array(np, frame.convert("L").filter(ImageFilter.FIND_EDGES))
+    ys, xs = np.nonzero(edges > edges.max() * 0.25)
+
+    height, width = edges.shape
+    diag = int(math.hypot(height, width)) + 1
+    cx, cy = width / 2, height / 2
+    acc = np.zeros((thetas_n, 2 * diag))
+    for i, theta in enumerate(np.linspace(0, math.pi, thetas_n)):
+        rho = ((xs - cx) * math.cos(theta) + (ys - cy) * math.sin(theta))
+        acc[i] = np.bincount(rho.astype(int) + diag, minlength=2 * diag)[:2 * diag]
+    return _from_array(np, _normalise(np, acc, 0.8), frame.size)
+
+
+def _polar_frame(frame: Image.Image, turns: int, logarithmic: bool) -> Image.Image:
+    """Remap the disc onto the frame: x becomes angle, y becomes radius.
+
+    The logarithmic variant spaces the radius exponentially, which magnifies
+    the middle of the picture and squeezes the rim -- that is the form used
+    for scale- and rotation-invariant matching.
+    """
+    check_count(LOGPOLAR if logarithmic else POLAR, turns)
+
+    width, height = frame.size
+    cx, cy = width / 2, height / 2
+    rim = min(cx, cy)
+    inner = 2.0
+
+    def source(x: float, y: float) -> tuple[float, float]:
+        angle = x / width * 2 * math.pi * turns
+        radius = (inner * (rim / inner) ** (y / height) if logarithmic
+                  else y / height * rim)
+        return cx + radius * math.cos(angle), cy + radius * math.sin(angle)
+
+    return _mesh_warp(frame, source)
+
+
 def _transform(
     frame: Image.Image, mode: str, count: int | None, offset: int | None,
     twist: int | None = None, index: int = 0,
 ) -> Image.Image:
+    if mode == WAVELET:
+        return _wavelet_frame(frame, default_count(WAVELET) if count is None else count)
+    if mode == DCT:
+        return _dct_frame(frame, default_count(DCT) if count is None else count)
+    if mode == RADON:
+        return _radon_frame(frame, default_count(RADON) if count is None else count)
+    if mode == HOUGH:
+        return _hough_frame(frame, default_count(HOUGH) if count is None else count)
+    if mode in (POLAR, LOGPOLAR):
+        return _polar_frame(frame, default_count(mode) if count is None else count,
+                            mode == LOGPOLAR)
     if mode == ROW_SHIFT:
         return _row_shift_frame(
             frame, default_count(ROW_SHIFT) if count is None else count, index)
