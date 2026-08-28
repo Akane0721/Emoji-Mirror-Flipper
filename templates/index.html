@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>对称表情包生成器</title>
+<title>唐氏表情包生成器</title>
 <style>
     :root {
         --bg: #faebd7;
@@ -130,10 +130,14 @@
     .chip .x:hover { opacity: 1; color: var(--danger); }
     .arrow { color: var(--muted); opacity: .6; font-size: .8rem; }
 
-    button.toggle { padding: 5px 11px; font-size: .8rem; border-radius: 8px; }
-    button.toggle.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+    /* Sits at the far right of its row so it doesn't read as another mode */
+    button.toggle {
+        padding: 5px 11px; font-size: .8rem; border-radius: 8px;
+        margin-left: auto; border-style: dashed;
+    }
     button.tiny { padding: 5px 11px; font-size: .8rem; border-radius: 8px; }
     button.hide { display: none; }
+    .rightgroup { margin-left: auto; display: inline-flex; gap: 8px; align-items: center; }
 
     .ctl {
         display: inline-flex; align-items: center; gap: 7px;
@@ -210,7 +214,7 @@
 </head>
 <body>
 <div class="wrap">
-    <h1>对称表情包生成器</h1>
+    <h1>唐氏表情包生成器</h1>
 
     <div id="drop">
         <div class="big">🫠</div>
@@ -230,17 +234,22 @@
                     {% for key, label in group.modes %}
                     <button class="mode" data-mode="{{ key }}">{{ label }}</button>
                     {% endfor %}
+                    {% if loop.last %}
+                    <button class="toggle" id="stackBtn"
+                            title="开启后，点击效果会追加到流程末尾，而不是替换掉现有的">＋ 叠加</button>
+                    {% endif %}
                 </div>
             </div>
             {% endfor %}
 
-            <div class="row" id="chainRow">
+            <div class="row hide" id="chainRow">
                 <span class="rlabel">流程</span>
                 <div class="chips">
                     <div class="chain" id="chainBox"></div>
-                    <button class="toggle" id="stackBtn"
-                            title="打开后，点击效果会追加到流程末尾，而不是替换掉现有的">＋ 叠加</button>
-                    <button class="ghost tiny hide" id="clearBtn">清空</button>
+                    <span class="rightgroup">
+                        <button class="ghost tiny hide" id="clearBtn">清空</button>
+                        <button class="tiny" id="doneBtn">完成</button>
+                    </span>
                 </div>
             </div>
 
@@ -305,7 +314,8 @@ const dlLink = $('dl'), spin = $('spin'), paramRow = $('paramRow');
 const countSelect = $('count'), countLabel = $('countLabel'), countCtl = $('countCtl');
 const offsetInput = $('offset'), offsetOut = $('offsetOut'), offsetCtl = $('offsetCtl');
 const twistInput = $('twist'), twistOut = $('twistOut'), twistCtl = $('twistCtl');
-const chainBox = $('chainBox'), stackBtn = $('stackBtn'), clearBtn = $('clearBtn');
+const chainBox = $('chainBox'), chainRow = $('chainRow');
+const stackBtn = $('stackBtn'), clearBtn = $('clearBtn'), doneBtn = $('doneBtn');
 const modeButtons = [...document.querySelectorAll('.mode')];
 
 const hasCount = (mode) => Object.prototype.hasOwnProperty.call(COUNTS_BY_MODE, mode);
@@ -419,10 +429,20 @@ function renderChain() {
         });
         chainBox.append(chip);
     });
-    clearBtn.classList.toggle('hide', chain.length === 0);
+    syncStackUI();
     // the mode buttons highlight whatever is in the chain
     modeButtons.forEach(b =>
         b.classList.toggle('on', chain.some(s => s.mode === b.dataset.mode)));
+}
+
+// The pipeline row only earns its space once there is something to show:
+// either the user turned stacking on, or a chain is already longer than one
+// step and still needs to be visible so it can be inspected and edited.
+function syncStackUI() {
+    chainRow.classList.toggle('hide', !(stacking || chain.length > 1));
+    stackBtn.classList.toggle('hide', stacking);
+    doneBtn.classList.toggle('hide', !stacking);
+    clearBtn.classList.toggle('hide', chain.length === 0);
 }
 
 function selectStep(i) {
@@ -565,8 +585,15 @@ document.addEventListener('paste', e => {
 modeButtons.forEach(b => b.addEventListener('click', () => pickMode(b.dataset.mode)));
 
 stackBtn.addEventListener('click', () => {
-    stacking = !stacking;
-    stackBtn.classList.toggle('on', stacking);
+    stacking = true;
+    renderChain();
+});
+
+// Leaving stacking mode doesn't touch the chain: a multi-step pipeline stays
+// on screen so it can still be edited, it just stops growing on the next click.
+doneBtn.addEventListener('click', () => {
+    stacking = false;
+    renderChain();
 });
 
 clearBtn.addEventListener('click', () => {
@@ -607,7 +634,6 @@ $('reset').addEventListener('click', () => {
     chain = [];
     selected = -1;
     stacking = false;
-    stackBtn.classList.remove('on');
     syncControls(null);
     renderChain();
     work.style.display = 'none';

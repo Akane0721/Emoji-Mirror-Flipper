@@ -324,7 +324,7 @@ def main() -> None:
             webbrowser.open(url)
         return
 
-    print(f"\n  对称表情包生成器已启动 -> {url}")
+    print(f"\n  唐氏表情包生成器已启动 -> {url}")
     print("  关掉这个窗口或按 Ctrl+C 停止\n")
 
     if open_browser:

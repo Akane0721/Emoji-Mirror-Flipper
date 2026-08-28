@@ -77,8 +77,8 @@ MODE_LABELS = {
     SPIRAL: "🌪️ 螺旋",
     TILE: "🧱 镜面平铺",
     PAPERCUT: "🪷 窗花",
-    ROW_SHIFT: "📼 行位移",
-    CHANNEL_SHIFT: "🌈 通道错位",
+    ROW_SHIFT: "📼 行同步失步",
+    CHANNEL_SHIFT: "🌈 红蓝通道平移",
     FOURIER: "📊 傅里叶变换",
     PHASE_RANDOM: "🎞️ 相位随机化",
 }
@@ -97,8 +97,8 @@ MODE_FILENAMES = {
     SPIRAL: "螺旋",
     TILE: "镜面平铺",
     PAPERCUT: "窗花",
-    ROW_SHIFT: "行位移",
-    CHANNEL_SHIFT: "通道错位",
+    ROW_SHIFT: "行同步失步",
+    CHANNEL_SHIFT: "红蓝通道平移",
     FOURIER: "傅里叶变换",
     PHASE_RANDOM: "相位随机化",
 }
