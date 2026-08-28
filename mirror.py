@@ -38,15 +38,18 @@ DCT = "dct"
 RADON = "radon"
 HOUGH = "hough"
 POLAR = "polar"
-LOGPOLAR = "logpolar"
+INVERSION = "inversion"
 
 # Modes assembled from angular wedges around the centre.
 RADIAL_MODES = (KALEIDO, PINWHEEL, SPIRAL)
 # Modes whose count means "cells per side" rather than "segments".
 GRID_MODES = (TILE, PAPERCUT)
 # Modes whose count is a plain 1-5 intensity dial.
-LEVEL_MODES = (ROW_SHIFT, CHANNEL_SHIFT, FOURIER, PHASE_RANDOM, WAVELET, DCT,
-               RADON, HOUGH, POLAR, LOGPOLAR)
+# Distortions: whatever comes out still reads as a picture.
+DEFORM_MODES = (ROW_SHIFT, CHANNEL_SHIFT, PHASE_RANDOM, INVERSION, POLAR)
+# Named transforms: the output is a coefficient space, not a picture.
+SPECTRAL_MODES = (FOURIER, WAVELET, DCT, RADON, HOUGH)
+LEVEL_MODES = DEFORM_MODES + SPECTRAL_MODES
 # Modes that need numpy; imported lazily so the rest keeps working without it.
 NUMPY_MODES = (FOURIER, PHASE_RANDOM, WAVELET, DCT, RADON, HOUGH)
 # Modes that use a pseudo-random seed. It is derived from the parameters and
@@ -69,7 +72,8 @@ MODE_GROUPS = (
     ("单轴", AXIS_MODES),
     ("折叠", FOLD_MODES),
     ("图案", (KALEIDO, PINWHEEL, SPIRAL, TILE, PAPERCUT)),
-    ("变换", LEVEL_MODES),
+    ("变形", DEFORM_MODES),
+    ("变换", SPECTRAL_MODES),
 )
 
 MODE_LABELS = {
@@ -94,7 +98,7 @@ MODE_LABELS = {
     RADON: "🩻 拉东变换",
     HOUGH: "📡 霍夫变换",
     POLAR: "🎯 极坐标变换",
-    LOGPOLAR: "🌀 对数极坐标",
+    INVERSION: "🔵 圆反演",
 }
 
 # Plain names for download filenames, without the emoji.
@@ -120,7 +124,7 @@ MODE_FILENAMES = {
     RADON: "拉东变换",
     HOUGH: "霍夫变换",
     POLAR: "极坐标变换",
-    LOGPOLAR: "对数极坐标",
+    INVERSION: "圆反演",
 }
 
 # The kaleidoscope mirrors each wedge, so two wedges make one cell and the
@@ -141,12 +145,12 @@ COUNTS_BY_MODE = {
     RADON: (1, 2, 3, 4, 5),
     HOUGH: (1, 2, 3, 4, 5),
     POLAR: (1, 2, 3, 4, 6),
-    LOGPOLAR: (1, 2, 3, 4, 6),
+    INVERSION: (1, 2, 3, 4, 5),
 }
 DEFAULT_COUNT_BY_MODE = {KALEIDO: 8, PINWHEEL: 8, SPIRAL: 6, TILE: 3, PAPERCUT: 3,
                          ROW_SHIFT: 3, CHANNEL_SHIFT: 3, FOURIER: 2,
                          PHASE_RANDOM: 3, WAVELET: 3, DCT: 3, RADON: 3,
-                         HOUGH: 3, POLAR: 1, LOGPOLAR: 1}
+                         HOUGH: 3, POLAR: 1, INVERSION: 3}
 # The grid modes count cells per side rather than segments around a centre, so
 # their selector is labelled differently and their readouts spell out the whole
 # n x n grid instead of a bare number.
@@ -155,13 +159,13 @@ COUNT_LABELS = {KALEIDO: "瓣数", PINWHEEL: "叶数", SPIRAL: "臂数",
                 ROW_SHIFT: "强度", CHANNEL_SHIFT: "强度",
                 FOURIER: "对比", PHASE_RANDOM: "强度",
                 WAVELET: "层数", DCT: "对比", RADON: "角度", HOUGH: "精度",
-                POLAR: "圈数", LOGPOLAR: "圈数"}
+                POLAR: "圈数", INVERSION: "半径"}
 COUNT_UNITS = {KALEIDO: "瓣", PINWHEEL: "叶", SPIRAL: "臂",
                TILE: "格", PAPERCUT: "格",
                ROW_SHIFT: "级", CHANNEL_SHIFT: "级",
                FOURIER: "级", PHASE_RANDOM: "级",
                WAVELET: "层", DCT: "级", RADON: "级", HOUGH: "级",
-               POLAR: "圈", LOGPOLAR: "圈"}
+               POLAR: "圈", INVERSION: "级"}
 
 # Total twist in degrees, strongest at the centre and fading to nothing at the
 # rim so the frame edges stay put.
@@ -193,7 +197,7 @@ MAX_PIXELS = 50_000_000  # decompression-bomb guard, roughly 7000x7000
 _PLAIN_RE = re.compile(r"\A(l2r|r2l|t2b|b2t|d1|d2|quad)\Z")
 _COUNT_RE = re.compile(
     r"\A(kaleido|pinwheel|tile|papercut|rowshift|chshift|fourier|phaserand"
-    r"|wavelet|dct|radon|hough|polar|logpolar)"
+    r"|wavelet|dct|radon|hough|polar|inversion)"
     r"_(\d{1,2})_(\d{1,3})\Z"
 )
 # The spiral carries a fourth field for its twist.
@@ -980,25 +984,56 @@ def _hough_frame(frame: Image.Image, level: int) -> Image.Image:
     return _from_array(np, _normalise(np, acc, 0.8), frame.size)
 
 
-def _polar_frame(frame: Image.Image, turns: int, logarithmic: bool) -> Image.Image:
-    """Remap the disc onto the frame: x becomes angle, y becomes radius.
-
-    The logarithmic variant spaces the radius exponentially, which magnifies
-    the middle of the picture and squeezes the rim -- that is the form used
-    for scale- and rotation-invariant matching.
-    """
-    check_count(LOGPOLAR if logarithmic else POLAR, turns)
+def _polar_frame(frame: Image.Image, turns: int) -> Image.Image:
+    """Remap the disc onto the frame: x becomes angle, y becomes radius."""
+    check_count(POLAR, turns)
 
     width, height = frame.size
     cx, cy = width / 2, height / 2
     rim = min(cx, cy)
-    inner = 2.0
 
     def source(x: float, y: float) -> tuple[float, float]:
         angle = x / width * 2 * math.pi * turns
-        radius = (inner * (rim / inner) ** (y / height) if logarithmic
-                  else y / height * rim)
+        radius = y / height * rim
         return cx + radius * math.cos(angle), cy + radius * math.sin(angle)
+
+    return _mesh_warp(frame, source)
+
+
+def _inversion_frame(frame: Image.Image, level: int) -> Image.Image:
+    """Inversion in a circle: z -> R^2 / conj(z).
+
+    Points inside the circle of radius R are flung outward and points outside
+    fold in, so the picture turns inside out while every circle in it stays a
+    circle. `level` sets R as a fraction of the inscribed radius.
+
+    Inversion sends the centre to infinity, so taken literally the middle of
+    the output samples from far outside the frame and comes back empty -- 39%
+    of the picture at the strongest setting. Hard-clamping the radius fixes
+    most of that but leaves the centre cells with corners pinned in four
+    different directions, which makes those mesh quads degenerate and still
+    punches a hole.
+
+    So the radius is softened instead: R^2 / (r + R^2/rim) matches true
+    inversion for anything but the very centre, and tends smoothly to the
+    inscribed radius as r goes to zero. Every sample then lands inside the
+    inscribed circle, and the mapping stays continuous everywhere.
+    """
+    check_count(INVERSION, level)
+
+    width, height = frame.size
+    cx, cy = width / 2, height / 2
+    rim = min(cx, cy)
+    radius = rim * {1: 0.45, 2: 0.55, 3: 0.65, 4: 0.78, 5: 0.9}[level]
+    softening = radius * radius / rim
+
+    def source(x: float, y: float) -> tuple[float, float]:
+        dx, dy = x - cx, y - cy
+        dist = math.hypot(dx, dy)
+        if dist < 1e-9:
+            return cx, cy + rim
+        reach = radius * radius / (dist + softening)
+        return cx + dx / dist * reach, cy + dy / dist * reach
 
     return _mesh_warp(frame, source)
 
@@ -1015,9 +1050,11 @@ def _transform(
         return _radon_frame(frame, default_count(RADON) if count is None else count)
     if mode == HOUGH:
         return _hough_frame(frame, default_count(HOUGH) if count is None else count)
-    if mode in (POLAR, LOGPOLAR):
-        return _polar_frame(frame, default_count(mode) if count is None else count,
-                            mode == LOGPOLAR)
+    if mode == POLAR:
+        return _polar_frame(frame, default_count(POLAR) if count is None else count)
+    if mode == INVERSION:
+        return _inversion_frame(
+            frame, default_count(INVERSION) if count is None else count)
     if mode == ROW_SHIFT:
         return _row_shift_frame(
             frame, default_count(ROW_SHIFT) if count is None else count, index)
