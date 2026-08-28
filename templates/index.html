@@ -130,14 +130,15 @@
     .chip .x:hover { opacity: 1; color: var(--danger); }
     .arrow { color: var(--muted); opacity: .6; font-size: .8rem; }
 
-    /* Sits at the far right of its row so it doesn't read as another mode */
-    button.toggle {
+    /* Both live at the far right of the pipeline row, and only one shows at a
+       time, so the control in that corner stays put as the mode changes. */
+    button.toggle, button.tiny {
         padding: 5px 11px; font-size: .8rem; border-radius: 8px;
-        margin-left: auto; border-style: dashed;
+        margin-left: auto;
     }
-    button.tiny { padding: 5px 11px; font-size: .8rem; border-radius: 8px; }
+    button.toggle { border-style: dashed; }
     button.hide { display: none; }
-    .rightgroup { margin-left: auto; display: inline-flex; gap: 8px; align-items: center; }
+    .chain.hide { display: none; }
 
     .ctl {
         display: inline-flex; align-items: center; gap: 7px;
@@ -234,22 +235,21 @@
                     {% for key, label in group.modes %}
                     <button class="mode" data-mode="{{ key }}">{{ label }}</button>
                     {% endfor %}
-                    {% if loop.last %}
-                    <button class="toggle" id="stackBtn"
-                            title="开启后，点击效果会追加到流程末尾，而不是替换掉现有的">＋ 叠加</button>
-                    {% endif %}
                 </div>
             </div>
             {% endfor %}
 
-            <div class="row hide" id="chainRow">
-                <span class="rlabel">流程</span>
+            <!-- One slot that morphs: just the "stack" button normally, the
+                 whole pipeline once stacking is on. Keeping it in the same row
+                 means the button never jumps around. -->
+            <div class="row" id="chainRow">
+                <span class="rlabel" id="chainLabel"></span>
                 <div class="chips">
-                    <div class="chain" id="chainBox"></div>
-                    <span class="rightgroup">
-                        <button class="ghost tiny hide" id="clearBtn">清空</button>
-                        <button class="tiny" id="doneBtn">完成</button>
-                    </span>
+                    <div class="chain hide" id="chainBox"></div>
+                    <button class="toggle" id="stackBtn"
+                            title="开启后，点击效果会追加到流程末尾，而不是替换掉现有的">＋ 叠加</button>
+                    <button class="ghost tiny hide" id="clearBtn"
+                            title="清空流程并退出叠加">清空</button>
                 </div>
             </div>
 
@@ -314,8 +314,8 @@ const dlLink = $('dl'), spin = $('spin'), paramRow = $('paramRow');
 const countSelect = $('count'), countLabel = $('countLabel'), countCtl = $('countCtl');
 const offsetInput = $('offset'), offsetOut = $('offsetOut'), offsetCtl = $('offsetCtl');
 const twistInput = $('twist'), twistOut = $('twistOut'), twistCtl = $('twistCtl');
-const chainBox = $('chainBox'), chainRow = $('chainRow');
-const stackBtn = $('stackBtn'), clearBtn = $('clearBtn'), doneBtn = $('doneBtn');
+const chainBox = $('chainBox'), chainLabel = $('chainLabel');
+const stackBtn = $('stackBtn'), clearBtn = $('clearBtn');
 const modeButtons = [...document.querySelectorAll('.mode')];
 
 const hasCount = (mode) => Object.prototype.hasOwnProperty.call(COUNTS_BY_MODE, mode);
@@ -435,14 +435,15 @@ function renderChain() {
         b.classList.toggle('on', chain.some(s => s.mode === b.dataset.mode)));
 }
 
-// The pipeline row only earns its space once there is something to show:
-// either the user turned stacking on, or a chain is already longer than one
-// step and still needs to be visible so it can be inspected and edited.
+// Outside stacking mode the row carries nothing but the "stack" button; once
+// stacking is on it becomes the pipeline, and the button in that same corner
+// turns into "clear". Clearing is the only way out, so a visible pipeline and
+// stacking mode always coincide.
 function syncStackUI() {
-    chainRow.classList.toggle('hide', !(stacking || chain.length > 1));
+    chainLabel.textContent = stacking ? '流程' : '';
+    chainBox.classList.toggle('hide', !stacking);
     stackBtn.classList.toggle('hide', stacking);
-    doneBtn.classList.toggle('hide', !stacking);
-    clearBtn.classList.toggle('hide', chain.length === 0);
+    clearBtn.classList.toggle('hide', !stacking);
 }
 
 function selectStep(i) {
@@ -589,16 +590,11 @@ stackBtn.addEventListener('click', () => {
     renderChain();
 });
 
-// Leaving stacking mode doesn't touch the chain: a multi-step pipeline stays
-// on screen so it can still be edited, it just stops growing on the next click.
-doneBtn.addEventListener('click', () => {
-    stacking = false;
-    renderChain();
-});
-
+// Clearing is also how you leave stacking mode -- one button instead of two.
 clearBtn.addEventListener('click', () => {
     chain = [];
     selected = -1;
+    stacking = false;
     syncControls(null);
     renderChain();
     outImg.style.display = 'none';
