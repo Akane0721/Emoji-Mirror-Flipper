@@ -28,22 +28,23 @@ PINWHEEL = "pinwheel"
 SPIRAL = "spiral"
 TILE = "tile"
 PAPERCUT = "papercut"
-GLITCH = "glitch"
-SPECTRUM = "spectrum"
-SCRAMBLE = "scramble"
+ROW_SHIFT = "rowshift"
+CHANNEL_SHIFT = "chshift"
+FOURIER = "fourier"
+PHASE_RANDOM = "phaserand"
 
 # Modes assembled from angular wedges around the centre.
 RADIAL_MODES = (KALEIDO, PINWHEEL, SPIRAL)
 # Modes whose count means "cells per side" rather than "segments".
 GRID_MODES = (TILE, PAPERCUT)
 # Modes whose count is a plain 1-5 intensity dial.
-LEVEL_MODES = (GLITCH, SPECTRUM, SCRAMBLE)
+LEVEL_MODES = (ROW_SHIFT, CHANNEL_SHIFT, FOURIER, PHASE_RANDOM)
 # Modes that need numpy; imported lazily so the rest keeps working without it.
-FOURIER_MODES = (SPECTRUM, SCRAMBLE)
+FOURIER_MODES = (FOURIER, PHASE_RANDOM)
 # Modes that use a pseudo-random seed. It is derived from the parameters and
 # the frame index so a given variant always renders identically -- the output
 # cache is keyed on the variant, so non-determinism would be a real bug.
-SEEDED_MODES = (GLITCH, SCRAMBLE)
+SEEDED_MODES = (ROW_SHIFT, PHASE_RANDOM)
 # Modes that take a numeric parameter from the same selector.
 COUNT_MODES = RADIAL_MODES + GRID_MODES + LEVEL_MODES
 # Only the spiral has a twist amount on top of count and start angle.
@@ -76,9 +77,10 @@ MODE_LABELS = {
     SPIRAL: "🌪️ 螺旋",
     TILE: "🧱 镜面平铺",
     PAPERCUT: "🪷 窗花",
-    GLITCH: "📼 故障",
-    SPECTRUM: "📊 频谱",
-    SCRAMBLE: "🎞️ 相位打乱",
+    ROW_SHIFT: "📼 行位移",
+    CHANNEL_SHIFT: "🌈 通道错位",
+    FOURIER: "📊 傅里叶变换",
+    PHASE_RANDOM: "🎞️ 相位随机化",
 }
 
 # Plain names for download filenames, without the emoji.
@@ -95,9 +97,10 @@ MODE_FILENAMES = {
     SPIRAL: "螺旋",
     TILE: "镜面平铺",
     PAPERCUT: "窗花",
-    GLITCH: "故障",
-    SPECTRUM: "频谱",
-    SCRAMBLE: "相位打乱",
+    ROW_SHIFT: "行位移",
+    CHANNEL_SHIFT: "通道错位",
+    FOURIER: "傅里叶变换",
+    PHASE_RANDOM: "相位随机化",
 }
 
 # The kaleidoscope mirrors each wedge, so two wedges make one cell and the
@@ -109,21 +112,25 @@ COUNTS_BY_MODE = {
     SPIRAL: (2, 3, 4, 5, 6, 8, 12),
     TILE: (2, 3, 4, 6),
     PAPERCUT: (2, 3, 4, 6),
-    GLITCH: (1, 2, 3, 4, 5),
-    SPECTRUM: (1, 2, 3, 4, 5),
-    SCRAMBLE: (1, 2, 3, 4, 5),
+    ROW_SHIFT: (1, 2, 3, 4, 5),
+    CHANNEL_SHIFT: (1, 2, 3, 4, 5),
+    FOURIER: (1, 2, 3, 4, 5),
+    PHASE_RANDOM: (1, 2, 3, 4, 5),
 }
 DEFAULT_COUNT_BY_MODE = {KALEIDO: 8, PINWHEEL: 8, SPIRAL: 6, TILE: 3, PAPERCUT: 3,
-                         GLITCH: 3, SPECTRUM: 2, SCRAMBLE: 3}
+                         ROW_SHIFT: 3, CHANNEL_SHIFT: 3, FOURIER: 2,
+                         PHASE_RANDOM: 3}
 # The grid modes count cells per side rather than segments around a centre, so
 # their selector is labelled differently and their readouts spell out the whole
 # n x n grid instead of a bare number.
 COUNT_LABELS = {KALEIDO: "瓣数", PINWHEEL: "叶数", SPIRAL: "臂数",
                 TILE: "格数", PAPERCUT: "格数",
-                GLITCH: "强度", SPECTRUM: "对比", SCRAMBLE: "强度"}
+                ROW_SHIFT: "强度", CHANNEL_SHIFT: "强度",
+                FOURIER: "对比", PHASE_RANDOM: "强度"}
 COUNT_UNITS = {KALEIDO: "瓣", PINWHEEL: "叶", SPIRAL: "臂",
                TILE: "格", PAPERCUT: "格",
-               GLITCH: "级", SPECTRUM: "级", SCRAMBLE: "级"}
+               ROW_SHIFT: "级", CHANNEL_SHIFT: "级",
+               FOURIER: "级", PHASE_RANDOM: "级"}
 
 # Total twist in degrees, strongest at the centre and fading to nothing at the
 # rim so the frame edges stay put.
@@ -154,7 +161,7 @@ MAX_PIXELS = 50_000_000  # decompression-bomb guard, roughly 7000x7000
 
 _PLAIN_RE = re.compile(r"\A(l2r|r2l|t2b|b2t|d1|d2|quad)\Z")
 _COUNT_RE = re.compile(
-    r"\A(kaleido|pinwheel|tile|papercut|glitch|spectrum|scramble)"
+    r"\A(kaleido|pinwheel|tile|papercut|rowshift|chshift|fourier|phaserand)"
     r"_(\d{1,2})_(\d{1,3})\Z"
 )
 # The spiral carries a fourth field for its twist.
@@ -655,13 +662,13 @@ def _spiral_frame(
 
 
 # --------------------------------------------------------------------------
-# Glitch and frequency-domain transforms
+# Non-symmetric transforms
 #
 # These are distortions rather than symmetries, but they compose well with the
-# symmetric modes -- feeding a glitched frame into the kaleidoscope is the
-# point. The seeded ones derive their seed from the parameters plus the frame
-# index, so a variant always renders identically (the cache depends on it)
-# while animations still get per-frame variation.
+# symmetric modes -- feeding a phase-randomised frame into the kaleidoscope is
+# the point. The seeded ones derive their seed from the parameters plus the
+# frame index, so a variant always renders identically (the cache depends on
+# it) while animations still get per-frame variation.
 # --------------------------------------------------------------------------
 
 def _seed_for(mode: str, level: int, index: int) -> int:
@@ -675,7 +682,7 @@ def _numpy():
         import numpy
     except ImportError:
         raise MirrorError(
-            "频谱和相位打乱需要 numpy，请重新运行 run.bat 装一下依赖"
+            "傅里叶变换和相位随机化需要 numpy，请重新运行 run.bat 装一下依赖"
         ) from None
     return numpy
 
@@ -689,15 +696,17 @@ def _slide(channel: Image.Image, dx: int) -> Image.Image:
     return moved
 
 
-def _glitch_frame(frame: Image.Image, level: int, index: int = 0) -> Image.Image:
-    """Scanline tears plus channel misregistration. Pillow only, no numpy."""
-    check_count(GLITCH, level)
-    rng = random.Random(_seed_for(GLITCH, level, index))
+def _row_shift_frame(frame: Image.Image, level: int, index: int = 0) -> Image.Image:
+    """Displace horizontal bands sideways, the way a video loses horizontal sync.
+
+    The roll wraps, so the frame keeps its full width instead of gaining blank
+    margins. A few opaque bars stand in for outright data corruption.
+    """
+    check_count(ROW_SHIFT, level)
+    rng = random.Random(_seed_for(ROW_SHIFT, level, index))
     width, height = frame.size
     out = frame.copy()
 
-    # Slice out horizontal bands and roll them sideways. The roll wraps, so
-    # the frame keeps its full width instead of gaining blank margins.
     for _ in range(level * 4):
         band_h = rng.randint(2, max(3, height // 24))
         y = rng.randrange(0, max(1, height - band_h))
@@ -708,13 +717,6 @@ def _glitch_frame(frame: Image.Image, level: int, index: int = 0) -> Image.Image
             rolled.paste(band, (dx + k * width, 0))
         out.paste(rolled, (0, y))
 
-    # Pull the red and blue channels apart; alpha stays put so the silhouette
-    # doesn't fringe.
-    shift = max(1, level * width // 200)
-    red, green, blue, alpha = out.split()
-    out = Image.merge("RGBA", (_slide(red, -shift), green, _slide(blue, shift), alpha))
-
-    # A few opaque tear bars for the "corrupted tape" read
     draw = ImageDraw.Draw(out)
     for _ in range(level):
         y = rng.randrange(height)
@@ -724,7 +726,19 @@ def _glitch_frame(frame: Image.Image, level: int, index: int = 0) -> Image.Image
     return out
 
 
-def _spectrum_frame(frame: Image.Image, level: int) -> Image.Image:
+def _channel_shift_frame(frame: Image.Image, level: int) -> Image.Image:
+    """Pull the red and blue channels apart, like a printing registration error.
+
+    Alpha stays put so the subject's silhouette doesn't fringe. Fully
+    deterministic -- there is nothing random to seed.
+    """
+    check_count(CHANNEL_SHIFT, level)
+    shift = max(1, level * frame.width // 200)
+    red, green, blue, alpha = frame.split()
+    return Image.merge("RGBA", (_slide(red, -shift), green, _slide(blue, shift), alpha))
+
+
+def _fourier_frame(frame: Image.Image, level: int) -> Image.Image:
     """Log magnitude spectrum of the frame, DC shifted to the centre.
 
     For a real-valued image F(-u,-v) is the conjugate of F(u,v), so the
@@ -733,7 +747,7 @@ def _spectrum_frame(frame: Image.Image, level: int) -> Image.Image:
     produce much the same faint cross; only strongly periodic sources give a
     spectrum with visible structure.
     """
-    check_count(SPECTRUM, level)
+    check_count(FOURIER, level)
     np = _numpy()
 
     # higher level = harder gamma = darker background, brighter peaks
@@ -745,23 +759,25 @@ def _spectrum_frame(frame: Image.Image, level: int) -> Image.Image:
     mag = (mag - mag.min()) / (span if span else 1.0)
     mag = mag ** gamma
 
-    out = Image.fromarray((mag * 255).astype("uint8"), "L").convert("RGBA")
-    return out
+    return Image.fromarray((mag * 255).astype("uint8"), "L").convert("RGBA")
 
 
-def _scramble_frame(frame: Image.Image, level: int, index: int = 0) -> Image.Image:
+def _phase_random_frame(
+    frame: Image.Image, level: int, index: int = 0
+) -> Image.Image:
     """Keep each channel's magnitude spectrum, randomise its phase.
 
     Magnitude carries how much of each spatial frequency is present; phase
     carries where it sits. Randomising phase therefore preserves the image's
     overall texture statistics while destroying its layout -- structured noise
-    that still "feels like" the original.
+    that still "feels like" the original. This is the standard way vision
+    research builds a stimulus matched to an image's amplitude spectrum.
     """
-    check_count(SCRAMBLE, level)
+    check_count(PHASE_RANDOM, level)
     np = _numpy()
 
     amount = {1: 0.15, 2: 0.3, 3: 0.5, 4: 0.75, 5: 1.0}[level]
-    rng = np.random.default_rng(_seed_for(SCRAMBLE, level, index))
+    rng = np.random.default_rng(_seed_for(PHASE_RANDOM, level, index))
 
     channels = []
     for channel in frame.convert("RGB").split():
@@ -782,16 +798,18 @@ def _transform(
     frame: Image.Image, mode: str, count: int | None, offset: int | None,
     twist: int | None = None, index: int = 0,
 ) -> Image.Image:
-    if mode == GLITCH:
-        return _glitch_frame(frame, default_count(GLITCH) if count is None else count,
-                             index)
-    if mode == SPECTRUM:
-        return _spectrum_frame(frame,
-                               default_count(SPECTRUM) if count is None else count)
-    if mode == SCRAMBLE:
-        return _scramble_frame(frame,
-                               default_count(SCRAMBLE) if count is None else count,
-                               index)
+    if mode == ROW_SHIFT:
+        return _row_shift_frame(
+            frame, default_count(ROW_SHIFT) if count is None else count, index)
+    if mode == CHANNEL_SHIFT:
+        return _channel_shift_frame(
+            frame, default_count(CHANNEL_SHIFT) if count is None else count)
+    if mode == FOURIER:
+        return _fourier_frame(
+            frame, default_count(FOURIER) if count is None else count)
+    if mode == PHASE_RANDOM:
+        return _phase_random_frame(
+            frame, default_count(PHASE_RANDOM) if count is None else count, index)
     if mode == SPIRAL:
         return _spiral_frame(
             frame,
